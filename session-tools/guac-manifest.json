@@ -1,0 +1,7 @@
+{
+    "guacamoleVersion" : "*",
+    "name"             : "Session Tools",
+    "namespace"        : "session-tools",
+    "js"  : [ "session-tools.js" ],
+    "css" : [ "session-tools.css" ]
+}
