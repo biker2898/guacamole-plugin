@@ -1,39 +1,54 @@
 #!/usr/bin/env bash
 #
-# Installs the "Session Tools" extension (ping meter + fullscreen button) into
-# an Apache Guacamole deployment that runs under Docker Compose.
+# Installs the extensions in this repository into an Apache Guacamole
+# deployment that runs under Docker Compose:
+#
+#   session-tools  ping meter + fullscreen button on the session page
+#   branding       hides the Guacamole look (name, logo, version, favicon)
 #
 # Usage:
-#   ./install.sh [compose-dir]              install or update (default: ~/docker/guacamole)
-#   ./install.sh --uninstall [compose-dir]  remove the extension
+#   ./install.sh [options] [compose-dir]     (default compose-dir: ~/docker/guacamole)
+#
+# Options:
+#   --no-branding   install only session-tools; removes branding if present
+#   --uninstall     remove both extensions
 #
 # Environment:
+#   BRAND     name shown instead of "Guacamole" (default: Portal)
 #   SERVICE   name of the Guacamole web app service (default: guacamole)
 #
 # What it does:
-#   1. Packages ./session-tools into session-tools.jar.
+#   1. Packages session-tools/ into session-tools.jar. Builds branding.jar
+#      from branding/ and the UI texts of the installed Guacamole.
 #   2. Finds the host folder mounted as the container's GUACAMOLE_HOME. If
 #      none is mounted, it mounts <compose-dir>/home through
 #      docker-compose.override.yml, leaving docker-compose.yml untouched.
-#   3. Copies the jar into <that folder>/extensions/ and recreates the
-#      Guacamole container, then checks the log that the extension loaded.
+#   3. Copies the jars into <that folder>/extensions/, recreates the Guacamole
+#      container and checks the log that the extensions loaded.
 #
-# Run it again after editing anything in ./session-tools.
+# Run it again after editing anything here or upgrading Guacamole.
 #
 set -euo pipefail
 
-NAME=session-tools
-DISPLAY_NAME="Session Tools"
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
-SRC_DIR=$SCRIPT_DIR/$NAME
 SERVICE=${SERVICE:-guacamole}
+BRAND=${BRAND:-Portal}
+# Location of the web app inside the official guacamole/guacamole image
+WAR_PATH=/opt/guacamole/webapp/guacamole.war
 
+BRANDING=true
 UNINSTALL=false
-if [ "${1:-}" = "--uninstall" ]; then
-    UNINSTALL=true
-    shift
-fi
-COMPOSE_DIR=$(cd "${1:-$HOME/docker/guacamole}" && pwd)
+COMPOSE_ARG=
+for arg in "$@"; do
+    case "$arg" in
+        --no-branding) BRANDING=false ;;
+        --uninstall)   UNINSTALL=true ;;
+        -h|--help)     awk 'NR > 1 && !/^#/ { exit } NR > 1' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -*)            echo "error: unknown option $arg" >&2; exit 1 ;;
+        *)             COMPOSE_ARG=$arg ;;
+    esac
+done
+COMPOSE_DIR=$(cd "${COMPOSE_ARG:-$HOME/docker/guacamole}" && pwd)
 
 die() { echo "error: $*" >&2; exit 1; }
 info() { echo "==> $*"; }
@@ -59,20 +74,53 @@ for volume in service.get("volumes") or []:
 ' "$SERVICE"
 }
 
+# Recreates the container and waits until each named extension is loaded
+restart_and_check() {
+    local since
+    since=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    docker compose up -d --force-recreate "$SERVICE"
+    [ $# -eq 0 ] && return 0
+
+    info "waiting for Guacamole to load: $*"
+    local logs pending
+    for _ in $(seq 1 60); do
+        logs=$(docker compose logs --no-color --since "$since" "$SERVICE" 2>&1)
+        pending=()
+        for name in "$@"; do
+            grep -q "Extension \"[^\"]*\" ($name) loaded" <<<"$logs" || pending+=("$name")
+        done
+        if [ ${#pending[@]} -eq 0 ]; then
+            info "loaded. Reload the Guacamole page with Ctrl+F5."
+            return 0
+        fi
+        for name in "${pending[@]}"; do
+            if grep -qi "extension.*$name.*\(fail\|error\|incompatible\)" <<<"$logs"; then
+                grep -i "$name" <<<"$logs" >&2
+                die "Guacamole rejected the $name extension"
+            fi
+        done
+        sleep 2
+    done
+    die "not reported as loaded after 120s: ${pending[*]}; check: docker compose -f $COMPOSE_DIR/docker-compose.yml logs $SERVICE"
+}
+
 HOME_DIR=$(find_home_mount)
 
 if $UNINSTALL; then
     [ -n "$HOME_DIR" ] || die "no GUACAMOLE_HOME mount found; nothing to remove"
-    JAR=$HOME_DIR/extensions/$NAME.jar
-    [ -f "$JAR" ] || die "$JAR not found; nothing to remove"
-    rm -f "$JAR"
-    info "removed $JAR"
-    docker compose restart "$SERVICE"
+    removed=false
+    for name in session-tools branding; do
+        if [ -f "$HOME_DIR/extensions/$name.jar" ]; then
+            rm -f "$HOME_DIR/extensions/$name.jar"
+            info "removed $HOME_DIR/extensions/$name.jar"
+            removed=true
+        fi
+    done
+    $removed || die "no extensions from this repository found in $HOME_DIR/extensions"
+    restart_and_check
     info "done"
     exit 0
 fi
-
-[ -f "$SRC_DIR/guac-manifest.json" ] || die "$SRC_DIR/guac-manifest.json not found"
 
 # Mount <compose-dir>/home as GUACAMOLE_HOME when nothing is mounted there yet
 if [ -z "$HOME_DIR" ]; then
@@ -90,11 +138,11 @@ EOF
     HOME_DIR=$(find_home_mount)
     [ -n "$HOME_DIR" ] || die "mount not picked up; check $OVERRIDE"
 fi
+EXT_DIR=$HOME_DIR/extensions
+mkdir -p "$EXT_DIR"
 
-# Package the extension; a jar is a zip with the manifest at its root
-mkdir -p "$HOME_DIR/extensions"
-JAR=$HOME_DIR/extensions/$NAME.jar
-python3 - "$SRC_DIR" "$JAR.tmp" <<'EOF'
+# session-tools: a jar is a zip with the manifest at its root
+python3 - "$SCRIPT_DIR/session-tools" "$EXT_DIR/session-tools.jar.tmp" <<'EOF'
 import os, sys, zipfile
 src, out = sys.argv[1], sys.argv[2]
 with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as jar:
@@ -103,24 +151,23 @@ with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as jar:
             path = os.path.join(root, name)
             jar.write(path, os.path.relpath(path, src))
 EOF
-mv "$JAR.tmp" "$JAR"
-info "built $JAR"
+mv "$EXT_DIR/session-tools.jar.tmp" "$EXT_DIR/session-tools.jar"
+info "built $EXT_DIR/session-tools.jar"
+EXTENSIONS=(session-tools)
 
-# Recreate so a new mount takes effect; Guacamole reads extensions at startup
-SINCE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-docker compose up -d --force-recreate "$SERVICE"
+# branding: texts come from the web app inside the image
+if $BRANDING; then
+    TMP=$(mktemp -d)
+    trap 'rm -rf "$TMP"' EXIT
+    docker compose create "$SERVICE" >/dev/null 2>&1 || true
+    docker compose cp "$SERVICE:$WAR_PATH" "$TMP/guacamole.war" >/dev/null 2>&1 \
+        || die "could not copy $WAR_PATH from the '$SERVICE' container; is it the official guacamole/guacamole image?"
+    python3 "$SCRIPT_DIR/branding/build.py" "$TMP/guacamole.war" "$EXT_DIR/branding.jar" "$BRAND"
+    EXTENSIONS+=(branding)
+elif [ -f "$EXT_DIR/branding.jar" ]; then
+    rm -f "$EXT_DIR/branding.jar"
+    info "removed $EXT_DIR/branding.jar"
+fi
 
-info "waiting for Guacamole to load the extension"
-for _ in $(seq 1 60); do
-    LOGS=$(docker compose logs --no-color --since "$SINCE" "$SERVICE" 2>&1)
-    if grep -q "Extension \"$DISPLAY_NAME\" ($NAME) loaded" <<<"$LOGS"; then
-        info "loaded. Reload the Guacamole page with Ctrl+F5."
-        exit 0
-    fi
-    if grep -qi "extension.*$NAME.*\(fail\|error\|incompatible\)" <<<"$LOGS"; then
-        grep -i "$NAME" <<<"$LOGS" >&2
-        die "Guacamole rejected the extension"
-    fi
-    sleep 2
-done
-die "extension not reported as loaded after 120s; check: docker compose -f $COMPOSE_DIR/docker-compose.yml logs $SERVICE"
+# Guacamole reads extensions at startup; recreate so a new mount takes effect
+restart_and_check "${EXTENSIONS[@]}"

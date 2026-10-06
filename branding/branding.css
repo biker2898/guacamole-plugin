@@ -1,0 +1,10 @@
+/* Login page: no Guacamole logo, no version number */
+.login-ui .login-dialog .logo,
+.login-ui .login-dialog .version .version-number {
+    display: none !important;
+}
+
+.login-ui .login-dialog .version .app-name {
+    font-size: 1.6em;
+    text-transform: none;
+}
