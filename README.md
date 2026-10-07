@@ -85,6 +85,43 @@ page with Ctrl+F5.
 Publish the container port on localhost only (`127.0.0.1:8080:8080`).
 Otherwise anyone can reach Guacamole directly and skip all of the above.
 
+## Shared drive for RDP (optional)
+
+RDP connections can map a folder on the Guacamole server as a drive in the
+remote Windows session, for file transfer in both directions.
+
+1. Mount a folder into the `guacd` service in `docker-compose.yml`:
+
+   ```yaml
+   guacd:
+     image: guacamole/guacd:1.6.0
+     restart: unless-stopped
+     volumes:
+       - ./drive:/drive
+   ```
+
+   `guacd` runs as UID 1000, so that UID must be able to write the folder:
+
+   ```sh
+   cd ~/docker/guacamole
+   mkdir -p drive/shared && sudo chown -R 1000:1000 drive
+   docker compose up -d
+   ```
+
+2. In **Settings → Connections → (the RDP connection) → Device Redirection**:
+
+   | Field                 | Value                                  |
+   |-----------------------|----------------------------------------|
+   | Enable drive          | checked                                |
+   | Drive name            | a neutral name, e.g. `WORKDRIVE`       |
+   | Drive path            | `/drive/shared`                        |
+   | Automatically create drive | checked                           |
+
+`/drive/shared` is one folder shared by every user of the connection. For a
+private folder per Guacamole user, use `/drive/${GUAC_USERNAME}` instead.
+Avoid the drive name `Guacamole` when using the branding extension: it shows
+up in Windows Explorer and gives the product away.
+
 ## Files
 
 - `session-tools/`: ping meter and fullscreen extension (manifest, JS, CSS).
