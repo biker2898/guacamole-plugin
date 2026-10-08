@@ -16,6 +16,14 @@ A floating, draggable widget on every remote session:
 - **Fullscreen button**: toggles browser fullscreen. In Chrome and Edge it
   also locks the keyboard, so Esc and Alt+Tab reach the remote desktop. It is
   hidden where the browser has no Fullscreen API (Safari on iPhone).
+- **Settings button**: opens a dialog with two settings:
+  - *Screen resolution*: "Fit browser window" (Guacamole's default) or a
+    fixed size such as 1920 × 1080. Applying it reconnects the session; the
+    choice is remembered per browser. Connections that set their own
+    `width` and `height` parameters ignore it.
+  - *Change password*: changes the user's Guacamole password. The account
+    needs the "change own password" permission (UPDATE on its own user);
+    otherwise the server refuses the change.
 
 The widget appears only on the session page (`#/client/...`). Its position is
 remembered per browser.
@@ -124,7 +132,7 @@ up in Windows Explorer and gives the product away.
 
 ## Files
 
-- `session-tools/`: ping meter and fullscreen extension (manifest, JS, CSS).
+- `session-tools/`: ping meter, fullscreen and settings extension (manifest, JS, CSS).
 - `branding/`: branding extension sources and `build.py`, which builds the jar.
 - `install.sh`: builds and installs both extensions.
 - `examples/nginx/`: optional nginx hardening.

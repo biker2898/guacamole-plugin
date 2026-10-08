@@ -54,7 +54,8 @@
 #session-tools .ping.fair .ping-dot { background: #ffc107; }
 #session-tools .ping.bad  .ping-dot { background: #f44336; }
 
-#session-tools .fullscreen {
+#session-tools .fullscreen,
+#session-tools .settings {
     width: 36px;
     height: 36px;
     padding: 0;
@@ -68,12 +69,145 @@
     justify-content: center;
 }
 
-#session-tools .fullscreen:hover {
+#session-tools .fullscreen:hover,
+#session-tools .settings:hover {
     background: rgba(255, 255, 255, 0.25);
 }
 
-#session-tools .fullscreen svg {
+#session-tools .fullscreen svg,
+#session-tools .settings svg {
     width: 20px;
     height: 20px;
     pointer-events: none;
+}
+
+/* Settings dialog */
+
+#session-tools-settings {
+    position: fixed;
+    inset: 0;
+    z-index: 2147483001;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    padding: 16px;
+    background: rgba(0, 0, 0, 0.5);
+    font: 14px/1.4 -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+#session-tools-settings.visible {
+    display: flex;
+}
+
+#session-tools-settings .dialog {
+    width: 100%;
+    max-width: 360px;
+    max-height: 100%;
+    overflow-y: auto;
+    box-sizing: border-box;
+    padding: 16px 20px 20px;
+    border-radius: 12px;
+    background: #fff;
+    color: #222;
+    box-shadow: 0 10px 40px rgba(0, 0, 0, 0.4);
+}
+
+#session-tools-settings .header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+}
+
+#session-tools-settings h2 {
+    margin: 0;
+    font-size: 18px;
+}
+
+#session-tools-settings h3 {
+    margin: 0 0 8px;
+    font-size: 14px;
+}
+
+#session-tools-settings .close {
+    width: 32px;
+    height: 32px;
+    padding: 0;
+    border: none;
+    border-radius: 50%;
+    background: transparent;
+    color: inherit;
+    font-size: 24px;
+    line-height: 1;
+    cursor: pointer;
+}
+
+#session-tools-settings .close:hover {
+    background: #eee;
+}
+
+#session-tools-settings form {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-top: 16px;
+    padding-top: 16px;
+    border-top: 1px solid #ddd;
+}
+
+#session-tools-settings label {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    font-size: 13px;
+}
+
+#session-tools-settings input,
+#session-tools-settings select {
+    box-sizing: border-box;
+    width: 100%;
+    padding: 8px;
+    border: 1px solid #bbb;
+    border-radius: 6px;
+    background: #fff;
+    color: inherit;
+    font: inherit;
+}
+
+#session-tools-settings .hint {
+    margin: 0;
+    color: #666;
+    font-size: 12px;
+}
+
+#session-tools-settings .status {
+    margin: 0;
+    font-size: 13px;
+}
+
+#session-tools-settings .status:empty {
+    display: none;
+}
+
+#session-tools-settings .status.error   { color: #c62828; }
+#session-tools-settings .status.success { color: #2e7d32; }
+
+#session-tools-settings .primary {
+    align-self: flex-start;
+    padding: 8px 16px;
+    border: none;
+    border-radius: 6px;
+    background: #1976d2;
+    color: #fff;
+    font: inherit;
+    font-weight: 600;
+    cursor: pointer;
+}
+
+#session-tools-settings .primary:hover {
+    background: #1565c0;
+}
+
+#session-tools-settings .primary:disabled {
+    background: #90a4ae;
+    cursor: default;
 }
