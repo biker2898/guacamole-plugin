@@ -10,6 +10,9 @@
  *  - A fullscreen toggle (hidden where the Fullscreen API is missing, such as
  *    Safari on iPhone).
  *
+ *  - A keys button. It opens a panel with F1-F12, Del, Ctrl+Alt+Del and
+ *    Ctrl, Alt and Shift toggles, for keys the browser or device cannot send.
+ *
  *  - A settings button. It opens a dialog to pick the screen resolution of
  *    the remote desktop and to change the user's Guacamole password.
  *
@@ -19,6 +22,7 @@
 
     var STORAGE_KEY = 'session-tools-position';
     var RESOLUTION_KEY = 'session-tools-resolution';
+    var COOKIE_MAX_AGE = 10 * 365 * 24 * 3600;
     var DRAG_THRESHOLD = 6;
 
     // Round-trip thresholds in milliseconds
@@ -43,6 +47,16 @@
     ];
 
     var MIN_PASSWORD_LENGTH = 8;
+
+    // X11 keysyms, as Guacamole sends them
+    var KEY_CTRL = 0xFFE3;
+    var KEY_ALT = 0xFFE9;
+    var KEY_SHIFT = 0xFFE1;
+    var KEY_DELETE = 0xFFFF;
+    var KEY_F1 = 0xFFBE;
+
+    var ICON_KEYBOARD = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">'
+        + '<rect x="2" y="5" width="20" height="14" rx="2"/><path d="M6 9h.01M10 9h.01M14 9h.01M18 9h.01M6 13h.01M18 13h.01M10 13h4M7 16h10"/></svg>';
 
     var ICON_SETTINGS = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">'
         + '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>';
@@ -175,9 +189,40 @@
      * resolution replaces those values, so it applies from the next
      * connection on. Connections that set "width" and "height" themselves
      * ignore it.
+     *
+     * The choice is kept in a cookie on the parent domain as well as in
+     * localStorage, so sites that share that domain (portal.example.com and
+     * portal2.example.com) share the choice too. The cookie holds "auto" for
+     * "fit browser window", so a later choice on one site overrides an older
+     * one from another.
      * ------------------------------------------------------------------- */
 
+    function readResolutionCookie() {
+        var match = doc.cookie.match(new RegExp('(?:^|;\\s*)' + RESOLUTION_KEY + '=([^;]*)'));
+        return match ? match[1] : null;
+    }
+
+    function writeResolutionCookie(value) {
+        var attributes = '; path=/; max-age=' + COOKIE_MAX_AGE + '; samesite=lax'
+            + (window.location.protocol === 'https:' ? '; secure' : '');
+
+        // Widest domain the browser accepts; it refuses public suffixes
+        var parts = window.location.hostname.split('.');
+        for (var i = Math.max(parts.length - 2, 0); i > 0; i--) {
+            doc.cookie = RESOLUTION_KEY + '=' + value + '; domain=' + parts.slice(i).join('.') + attributes;
+            if (readResolutionCookie() === value)
+                return;
+        }
+        doc.cookie = RESOLUTION_KEY + '=' + value + attributes;
+    }
+
     function savedResolution() {
+        var cookie = readResolutionCookie();
+        var match = cookie && /^(\d+)x(\d+)$/.exec(cookie);
+        if (match)
+            return { width: parseInt(match[1], 10), height: parseInt(match[2], 10) };
+        if (cookie === 'auto')
+            return null;
         try {
             var saved = JSON.parse(localStorage.getItem(RESOLUTION_KEY));
             if (saved && saved.width > 0 && saved.height > 0)
@@ -188,6 +233,7 @@
     }
 
     function saveResolution(resolution) {
+        writeResolutionCookie(resolution ? resolution.width + 'x' + resolution.height : 'auto');
         try {
             if (resolution)
                 localStorage.setItem(RESOLUTION_KEY, JSON.stringify(resolution));
@@ -411,6 +457,140 @@
     }
 
     /* ---------------------------------------------------------------------
+     * Keys panel
+     *
+     * Keys go to the remote desktop through Guacamole's own "synthetic key"
+     * events, the same path as its on-screen keyboard. Ctrl, Alt and Shift
+     * latch: they stay pressed until the next other key, from the panel or
+     * the physical keyboard, or until tapped again.
+     * ------------------------------------------------------------------- */
+
+    function sendKey(pressed, keysym) {
+        var rootScope = guacamoleService('$rootScope');
+        if (rootScope)
+            rootScope.$broadcast(pressed ? 'guacSyntheticKeydown' : 'guacSyntheticKeyup', keysym);
+    }
+
+    function createKeysPanel(widget) {
+
+        var panel = element('div');
+        panel.id = 'session-tools-keys';
+
+        var latched = {};
+        var modifierButtons = {};
+
+        function releaseModifiers() {
+            Object.keys(latched).forEach(function (keysym) {
+                sendKey(false, parseInt(keysym, 10));
+                modifierButtons[keysym].classList.remove('active');
+            });
+            latched = {};
+        }
+
+        function pressKey(keysym) {
+            sendKey(true, keysym);
+            sendKey(false, keysym);
+            releaseModifiers();
+        }
+
+        function addButton(row, text, title, onPress) {
+            var button = element('button', null, text);
+            button.type = 'button';
+            button.title = title;
+            button.addEventListener('click', onPress);
+            row.appendChild(button);
+            return button;
+        }
+
+        var functionKeys = element('div', 'keys function-keys');
+        for (var n = 1; n <= 12; n++) {
+            (function (keysym, name) {
+                addButton(functionKeys, name, name, function () { pressKey(keysym); });
+            })(KEY_F1 + n - 1, 'F' + n);
+        }
+        panel.appendChild(functionKeys);
+
+        var modifiers = element('div', 'keys');
+        [[KEY_CTRL, 'Ctrl'], [KEY_ALT, 'Alt'], [KEY_SHIFT, 'Shift']].forEach(function (key) {
+            var keysym = key[0];
+            modifierButtons[keysym] = addButton(modifiers, key[1], 'Hold ' + key[1] + ' for the next key', function () {
+                if (latched[keysym]) {
+                    delete latched[keysym];
+                    sendKey(false, keysym);
+                    modifierButtons[keysym].classList.remove('active');
+                }
+                else {
+                    latched[keysym] = true;
+                    sendKey(true, keysym);
+                    modifierButtons[keysym].classList.add('active');
+                }
+            });
+        });
+        addButton(modifiers, 'Del', 'Delete', function () { pressKey(KEY_DELETE); });
+        panel.appendChild(modifiers);
+
+        var combos = element('div', 'keys');
+        addButton(combos, 'Ctrl + Alt + Del', 'Send Ctrl+Alt+Del', function () {
+            [KEY_CTRL, KEY_ALT, KEY_DELETE].forEach(function (keysym) { sendKey(true, keysym); });
+            [KEY_DELETE, KEY_ALT, KEY_CTRL].forEach(function (keysym) { sendKey(false, keysym); });
+            releaseModifiers();
+        }).className = 'wide';
+        panel.appendChild(combos);
+
+        // A latched modifier applies to the next key typed on the physical
+        // keyboard too; release it once Guacamole has sent that key
+        window.addEventListener('keyup', function (e) {
+            if (Object.keys(latched).length && !/^(Control|Alt|Shift|Meta|AltGraph)$/.test(e.key))
+                window.setTimeout(releaseModifiers, 50);
+        }, true);
+
+        // Keep focus where it is, and clicks and touches away from the
+        // remote display underneath
+        panel.addEventListener('mousedown', function (e) { e.preventDefault(); });
+        ['pointerdown', 'pointerup', 'mousedown', 'mouseup', 'click', 'touchstart', 'touchend'].forEach(function (type) {
+            panel.addEventListener(type, function (e) { e.stopPropagation(); });
+        });
+
+        doc.body.appendChild(panel);
+
+        function isOpen() {
+            return panel.classList.contains('visible');
+        }
+
+        // Next to the widget: above it when there is room, else below
+        function position() {
+            if (!isOpen())
+                return;
+            var anchor = widget.getBoundingClientRect();
+            var width = panel.offsetWidth;
+            var height = panel.offsetHeight;
+            var top = anchor.top - height - 8 >= 0 ? anchor.top - height - 8 : anchor.bottom + 8;
+            panel.style.left = clamp(anchor.right - width, 0, window.innerWidth - width) + 'px';
+            panel.style.top = clamp(top, 0, window.innerHeight - height) + 'px';
+        }
+
+        function hide() {
+            panel.classList.remove('visible');
+            releaseModifiers();
+        }
+
+        window.addEventListener('resize', position);
+
+        return {
+            toggle: function () {
+                if (isOpen())
+                    hide();
+                else {
+                    panel.classList.add('visible');
+                    position();
+                }
+            },
+            hide: hide,
+            position: position
+        };
+    }
+
+    /* ---------------------------------------------------------------------
      * Widget placement
      * ------------------------------------------------------------------- */
 
@@ -475,6 +655,15 @@
             doc.addEventListener('webkitfullscreenchange', function () { updateFullscreenIcon(button); });
         }
 
+        var keysButton = doc.createElement('button');
+        keysButton.type = 'button';
+        keysButton.className = 'keys-toggle';
+        keysButton.title = 'Keys (F1-F12, Ctrl, Alt, Del, Shift)';
+        keysButton.innerHTML = ICON_KEYBOARD;
+        widget.appendChild(keysButton);
+
+        var keys = createKeysPanel(widget);
+
         var settingsButton = doc.createElement('button');
         settingsButton.type = 'button';
         settingsButton.className = 'settings';
@@ -509,6 +698,7 @@
             dragging = true;
             widget.classList.add('dragging');
             placeWidget(widget, start.left + dx, start.top + dy);
+            keys.position();
         });
 
         widget.addEventListener('pointerup', function (e) {
@@ -519,6 +709,8 @@
                 savePosition(widget);
             else if (button && button.contains(start.target))
                 toggleFullscreen();
+            else if (keysButton.contains(start.target))
+                keys.toggle();
             else if (settingsButton.contains(start.target))
                 settings.open();
             start = null;
@@ -547,6 +739,7 @@
         updatePing(meter, label);
         window.setInterval(function () { updatePing(meter, label); }, 1000);
 
+        widget.keys = keys;
         return widget;
     }
 
@@ -560,8 +753,10 @@
             widget.classList.toggle('visible', inSession);
             if (inSession)
                 restorePosition(widget);
-            else
+            else {
                 settings.hide();
+                widget.keys.hide();
+            }
         }
 
         window.addEventListener('hashchange', updateVisibility);

@@ -55,8 +55,10 @@
 #session-tools .ping.bad  .ping-dot { background: #f44336; }
 
 #session-tools .fullscreen,
+#session-tools .keys-toggle,
 #session-tools .settings {
     width: 36px;
+    min-width: 0;
     height: 36px;
     padding: 0;
     border: none;
@@ -70,15 +72,71 @@
 }
 
 #session-tools .fullscreen:hover,
+#session-tools .keys-toggle:hover,
 #session-tools .settings:hover {
     background: rgba(255, 255, 255, 0.25);
 }
 
 #session-tools .fullscreen svg,
+#session-tools .keys-toggle svg,
 #session-tools .settings svg {
     width: 20px;
     height: 20px;
     pointer-events: none;
+}
+
+/* Keys panel */
+
+#session-tools-keys {
+    position: fixed;
+    z-index: 2147483000;
+    display: none;
+    flex-direction: column;
+    gap: 6px;
+    padding: 8px;
+    border: 1px solid rgba(255, 255, 255, 0.35);
+    border-radius: 12px;
+    background: rgba(0, 0, 0, 0.8);
+    font: 600 12px/1 -apple-system, "Segoe UI", Roboto, sans-serif;
+    user-select: none;
+    -webkit-user-select: none;
+    touch-action: manipulation;
+}
+
+#session-tools-keys.visible {
+    display: flex;
+}
+
+#session-tools-keys .keys {
+    display: flex;
+    gap: 6px;
+}
+
+#session-tools-keys .function-keys {
+    display: grid;
+    grid-template-columns: repeat(6, 1fr);
+}
+
+#session-tools-keys button {
+    flex: 1;
+    min-width: 40px;
+    height: 34px;
+    padding: 0 8px;
+    border: 1px solid rgba(255, 255, 255, 0.25);
+    border-radius: 6px;
+    background: rgba(255, 255, 255, 0.12);
+    color: #fff;
+    font: inherit;
+    cursor: pointer;
+}
+
+#session-tools-keys button:hover {
+    background: rgba(255, 255, 255, 0.25);
+}
+
+#session-tools-keys button.active {
+    border-color: #64b5f6;
+    background: #1976d2;
 }
 
 /* Settings dialog */
