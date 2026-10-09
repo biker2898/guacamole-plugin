@@ -22,7 +22,7 @@ A floating, draggable widget on every remote session:
   panel or the physical keyboard) or until tapped again.
 - **Settings button**: opens a dialog with two settings:
   - *Screen resolution*: "Fit browser window" (Guacamole's default) or a
-    fixed size such as 1920 × 1080. Applying it reconnects the session; the
+    fixed 16:9 or 16:10 size such as 1920 × 1080 or 1280 × 800. Applying it reconnects the session; the
     choice is remembered per browser, and shared by sites on the same parent
     domain (for example portal.example.com and portal2.example.com). Connections that set their own
     `width` and `height` parameters ignore it.

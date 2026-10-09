@@ -40,10 +40,11 @@
 
     var ICON_ENTER = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">'
         + '<path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg>';
-    // Fixed resolutions offered in the settings dialog, besides "fit window"
+    // Fixed resolutions offered in the settings dialog, besides "fit window",
+    // grouped by aspect ratio
     var RESOLUTIONS = [
-        [1280, 720], [1366, 768], [1440, 900], [1600, 900],
-        [1920, 1080], [2560, 1440]
+        ['Widescreen (16:9)', [[1280, 720], [1366, 768], [1600, 900], [1920, 1080], [2560, 1440]]],
+        ['Laptop (16:10)', [[1280, 800], [1440, 900], [1680, 1050], [1920, 1200], [2560, 1600]]]
     ];
 
     var MIN_PASSWORD_LENGTH = 8;
@@ -354,8 +355,13 @@
         resolutionForm.appendChild(element('h3', null, 'Screen resolution'));
         var select = element('select');
         select.appendChild(new Option('Fit browser window', ''));
-        RESOLUTIONS.forEach(function (size) {
-            select.appendChild(new Option(size[0] + ' \u00d7 ' + size[1], size[0] + 'x' + size[1]));
+        RESOLUTIONS.forEach(function (group) {
+            var optgroup = element('optgroup');
+            optgroup.label = group[0];
+            group[1].forEach(function (size) {
+                optgroup.appendChild(new Option(size[0] + ' \u00d7 ' + size[1], size[0] + 'x' + size[1]));
+            });
+            select.appendChild(optgroup);
         });
         resolutionForm.appendChild(select);
         resolutionForm.appendChild(element('p', 'hint', 'Applying reconnects the session. Open programs stay open.'));
