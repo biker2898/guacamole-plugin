@@ -20,6 +20,13 @@ A floating, draggable widget on every remote session:
   Alt and Shift toggles, for keys the browser or device cannot send. A
   toggled Ctrl, Alt or Shift stays pressed until the next other key (from the
   panel or the physical keyboard) or until tapped again.
+- **Clipboard button**: opens a text box for browsers where Guacamole's
+  automatic clipboard sync does not work, such as on Android. Paste text into
+  the box (or tap "From device"), then "Send" it to the remote clipboard,
+  "Send + paste" to also press Ctrl+V, or "Type" it key by key where pasting
+  is blocked (for example the Windows login screen). Text copied on the
+  remote desktop appears in the box; "Copy to device" copies it onto this
+  device.
 - **Settings button**: opens a dialog with two settings:
   - *Screen resolution*: "Fit browser window" (Guacamole's default) or a
     fixed 16:9 or 16:10 size such as 1920 × 1080 or 1280 × 800. Applying it reconnects the session; the
@@ -137,7 +144,7 @@ up in Windows Explorer and gives the product away.
 
 ## Files
 
-- `session-tools/`: ping meter, fullscreen, keys and settings extension (manifest, JS, CSS).
+- `session-tools/`: ping meter, fullscreen, keys, clipboard and settings extension (manifest, JS, CSS).
 - `branding/`: branding extension sources and `build.py`, which builds the jar.
 - `install.sh`: builds and installs both extensions.
 - `examples/nginx/`: optional nginx hardening.

@@ -56,6 +56,7 @@
 
 #session-tools .fullscreen,
 #session-tools .keys-toggle,
+#session-tools .clipboard-toggle,
 #session-tools .settings {
     width: 36px;
     min-width: 0;
@@ -73,71 +74,130 @@
 
 #session-tools .fullscreen:hover,
 #session-tools .keys-toggle:hover,
+#session-tools .clipboard-toggle:hover,
 #session-tools .settings:hover {
     background: rgba(255, 255, 255, 0.25);
 }
 
 #session-tools .fullscreen svg,
 #session-tools .keys-toggle svg,
+#session-tools .clipboard-toggle svg,
 #session-tools .settings svg {
     width: 20px;
     height: 20px;
     pointer-events: none;
 }
 
-/* Keys panel */
+/* Panels next to the widget */
 
-#session-tools-keys {
+.session-tools-panel {
     position: fixed;
     z-index: 2147483000;
     display: none;
     flex-direction: column;
     gap: 6px;
+    box-sizing: border-box;
+    max-width: calc(100vw - 16px);
     padding: 8px;
     border: 1px solid rgba(255, 255, 255, 0.35);
     border-radius: 12px;
     background: rgba(0, 0, 0, 0.8);
+    color: #fff;
     font: 600 12px/1 -apple-system, "Segoe UI", Roboto, sans-serif;
     user-select: none;
     -webkit-user-select: none;
     touch-action: manipulation;
 }
 
-#session-tools-keys.visible {
+.session-tools-panel.visible {
     display: flex;
 }
 
-#session-tools-keys .keys {
+.session-tools-panel .keys {
     display: flex;
+    flex-wrap: wrap;
     gap: 6px;
 }
 
-#session-tools-keys .function-keys {
+.session-tools-panel .function-keys {
     display: grid;
     grid-template-columns: repeat(6, 1fr);
 }
 
-#session-tools-keys button {
+.session-tools-panel button {
     flex: 1;
     min-width: 40px;
     height: 34px;
+    margin: 0;
     padding: 0 8px;
     border: 1px solid rgba(255, 255, 255, 0.25);
     border-radius: 6px;
     background: rgba(255, 255, 255, 0.12);
     color: #fff;
     font: inherit;
+    white-space: nowrap;
     cursor: pointer;
 }
 
-#session-tools-keys button:hover {
+.session-tools-panel button:hover {
     background: rgba(255, 255, 255, 0.25);
 }
 
-#session-tools-keys button.active {
+.session-tools-panel button.active {
     border-color: #64b5f6;
     background: #1976d2;
 }
+
+/* Clipboard panel */
+
+#session-tools-clipboard {
+    width: 320px;
+}
+
+#session-tools-clipboard .title {
+    padding: 2px 2px 0;
+    font-size: 13px;
+}
+
+#session-tools-clipboard textarea {
+    box-sizing: border-box;
+    width: 100%;
+    min-height: 80px;
+    margin: 0;
+    padding: 6px;
+    border: 1px solid rgba(255, 255, 255, 0.35);
+    border-radius: 6px;
+    background: rgba(255, 255, 255, 0.95);
+    color: #222;
+    font: 13px/1.4 -apple-system, "Segoe UI", Roboto, sans-serif;
+    resize: vertical;
+    user-select: text;
+    -webkit-user-select: text;
+}
+
+#session-tools-clipboard .actions {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 6px;
+}
+
+/* "Type" takes the full last row */
+#session-tools-clipboard .actions button:last-child {
+    grid-column: span 2;
+}
+
+#session-tools-clipboard .status {
+    margin: 0;
+    font-weight: 400;
+    line-height: 1.3;
+}
+
+#session-tools-clipboard .status:empty {
+    display: none;
+}
+
+#session-tools-clipboard .status.error   { color: #ef9a9a; }
+#session-tools-clipboard .status.success { color: #a5d6a7; }
 
 /* Settings dialog */
 

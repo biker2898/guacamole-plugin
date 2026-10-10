@@ -13,6 +13,10 @@
  *  - A keys button. It opens a panel with F1-F12, Del, Ctrl+Alt+Del and
  *    Ctrl, Alt and Shift toggles, for keys the browser or device cannot send.
  *
+ *  - A clipboard button. It opens a text box to send text to the remote
+ *    clipboard or type it, and to copy remote text onto this device, for
+ *    browsers (such as on Android) where the automatic clipboard sync fails.
+ *
  *  - A settings button. It opens a dialog to pick the screen resolution of
  *    the remote desktop and to change the user's Guacamole password.
  *
@@ -56,6 +60,8 @@
     var KEY_DELETE = 0xFFFF;
     var KEY_F1 = 0xFFBE;
 
+    var ICON_CLIPBOARD = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">'
+        + '<rect x="8" y="2" width="8" height="4" rx="1"/><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/></svg>';
     var ICON_KEYBOARD = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">'
         + '<rect x="2" y="5" width="20" height="14" rx="2"/><path d="M6 9h.01M10 9h.01M14 9h.01M18 9h.01M6 13h.01M18 13h.01M10 13h4M7 16h10"/></svg>';
 
@@ -463,6 +469,65 @@
     }
 
     /* ---------------------------------------------------------------------
+     * Panels next to the widget (keys, clipboard). One is open at a time.
+     * ------------------------------------------------------------------- */
+
+    function addButton(row, text, title, onPress) {
+        var button = element('button', null, text);
+        button.type = 'button';
+        button.title = title;
+        button.addEventListener('click', onPress);
+        row.appendChild(button);
+        return button;
+    }
+
+    function createPanel(widget, id, onHide) {
+
+        var panel = element('div', 'session-tools-panel');
+        panel.id = id;
+
+        // Keep clicks and touches away from the remote display underneath
+        ['pointerdown', 'pointerup', 'mousedown', 'mouseup', 'click', 'touchstart', 'touchend'].forEach(function (type) {
+            panel.addEventListener(type, function (e) { e.stopPropagation(); });
+        });
+
+        doc.body.appendChild(panel);
+
+        function isOpen() {
+            return panel.classList.contains('visible');
+        }
+
+        // Next to the widget: above it when there is room, else below
+        function position() {
+            if (!isOpen())
+                return;
+            var anchor = widget.getBoundingClientRect();
+            var width = panel.offsetWidth;
+            var height = panel.offsetHeight;
+            var top = anchor.top - height - 8 >= 0 ? anchor.top - height - 8 : anchor.bottom + 8;
+            panel.style.left = clamp(anchor.right - width, 0, window.innerWidth - width) + 'px';
+            panel.style.top = clamp(top, 0, window.innerHeight - height) + 'px';
+        }
+
+        window.addEventListener('resize', position);
+
+        return {
+            element: panel,
+            isOpen: isOpen,
+            position: position,
+            show: function () {
+                panel.classList.add('visible');
+                position();
+            },
+            hide: function () {
+                panel.classList.remove('visible');
+                if (onHide)
+                    onHide();
+            }
+        };
+    }
+
+    /* ---------------------------------------------------------------------
      * Keys panel
      *
      * Keys go to the remote desktop through Guacamole's own "synthetic key"
@@ -479,9 +544,6 @@
 
     function createKeysPanel(widget) {
 
-        var panel = element('div');
-        panel.id = 'session-tools-keys';
-
         var latched = {};
         var modifierButtons = {};
 
@@ -493,19 +555,13 @@
             latched = {};
         }
 
+        var keys = createPanel(widget, 'session-tools-keys', releaseModifiers);
+        var panel = keys.element;
+
         function pressKey(keysym) {
             sendKey(true, keysym);
             sendKey(false, keysym);
             releaseModifiers();
-        }
-
-        function addButton(row, text, title, onPress) {
-            var button = element('button', null, text);
-            button.type = 'button';
-            button.title = title;
-            button.addEventListener('click', onPress);
-            row.appendChild(button);
-            return button;
         }
 
         var functionKeys = element('div', 'keys function-keys');
@@ -550,50 +606,161 @@
                 window.setTimeout(releaseModifiers, 50);
         }, true);
 
-        // Keep focus where it is, and clicks and touches away from the
-        // remote display underneath
+        // Keep keyboard focus where it is
         panel.addEventListener('mousedown', function (e) { e.preventDefault(); });
-        ['pointerdown', 'pointerup', 'mousedown', 'mouseup', 'click', 'touchstart', 'touchend'].forEach(function (type) {
-            panel.addEventListener(type, function (e) { e.stopPropagation(); });
+
+        return keys;
+    }
+
+    /* ---------------------------------------------------------------------
+     * Clipboard panel
+     *
+     * Guacamole syncs the clipboard by reading the browser's clipboard on
+     * its own, which mobile browsers (Android) refuse. Here the user pastes
+     * into a text box instead and sends it: onto the remote clipboard
+     * (optionally followed by Ctrl+V), or typed key by key for places that
+     * ignore the clipboard. Text copied on the remote desktop shows up in
+     * the box, to copy onto this device.
+     * ------------------------------------------------------------------- */
+
+    // Keysym for a character: Latin-1 maps directly, the rest of Unicode
+    // goes through the 0x01000000 range
+    function keysymForCharacter(character) {
+        var codePoint = character.codePointAt(0);
+        if (character === '\n')
+            return 0xFF0D;
+        if (character === '\t')
+            return 0xFF09;
+        if (codePoint >= 0x20 && codePoint <= 0x7E || codePoint >= 0xA0 && codePoint <= 0xFF)
+            return codePoint;
+        return 0x01000000 | codePoint;
+    }
+
+    function createClipboardPanel(widget) {
+
+        var clipboard = createPanel(widget, 'session-tools-clipboard');
+        var panel = clipboard.element;
+
+        panel.appendChild(element('div', 'title', 'Clipboard'));
+
+        var text = element('textarea');
+        text.rows = 4;
+        text.spellcheck = false;
+        text.placeholder = 'Paste or type text here, then send it to the remote computer.';
+        panel.appendChild(text);
+
+        var status = element('p', 'status');
+        status.setAttribute('aria-live', 'polite');
+
+        function setPanelStatus(message, state) {
+            setStatus(status, message, state);
+            clipboard.position();
+        }
+
+        function sendToRemote() {
+            var service = guacamoleService('clipboardService');
+            var ClipboardData = guacamoleService('ClipboardData');
+            if (!service || !ClipboardData)
+                return Promise.reject();
+            return service.setClipboard(new ClipboardData({ type: 'text/plain', data: text.value }));
+        }
+
+        var actions = element('div', 'actions');
+
+        addButton(actions, 'From device', 'Paste the clipboard of this device into the box', function () {
+            if (!navigator.clipboard || !navigator.clipboard.readText)
+                return setPanelStatus('Long-press the box and choose Paste.');
+            navigator.clipboard.readText().then(function (value) {
+                text.value = value;
+                setPanelStatus(value ? '' : 'The clipboard of this device is empty.');
+            }, function () {
+                setPanelStatus('The browser did not allow it. Long-press the box and choose Paste.', 'error');
+            });
         });
 
-        doc.body.appendChild(panel);
+        addButton(actions, 'Copy to device', 'Copy the text in the box to the clipboard of this device', function () {
+            function copied() { setPanelStatus('Copied to this device.', 'success'); }
+            function fallback() {
+                text.select();
+                if (doc.execCommand('copy'))
+                    copied();
+                else
+                    setPanelStatus('Long-press the box and choose Copy.', 'error');
+            }
+            if (navigator.clipboard && navigator.clipboard.writeText)
+                navigator.clipboard.writeText(text.value).then(copied, fallback);
+            else
+                fallback();
+        });
 
-        function isOpen() {
-            return panel.classList.contains('visible');
+        addButton(actions, 'Send', 'Put the text on the remote clipboard', function () {
+            sendToRemote().then(function () {
+                setPanelStatus('Sent. Paste it on the remote computer with Ctrl+V.', 'success');
+            }, function () {
+                setPanelStatus('Not connected.', 'error');
+            });
+        });
+
+        addButton(actions, 'Send + paste', 'Put the text on the remote clipboard and press Ctrl+V', function () {
+            sendToRemote().then(function () {
+                // Give the remote clipboard a moment to update before pasting
+                window.setTimeout(function () {
+                    sendKey(true, KEY_CTRL);
+                    sendKey(true, 0x76);
+                    sendKey(false, 0x76);
+                    sendKey(false, KEY_CTRL);
+                }, 300);
+                setPanelStatus('Sent and pasted.', 'success');
+            }, function () {
+                setPanelStatus('Not connected.', 'error');
+            });
+        });
+
+        addButton(actions, 'Type', 'Type the text on the remote computer, key by key (works where pasting does not, such as the Windows login screen)', function () {
+            Array.from(text.value.replace(/\r/g, '')).forEach(function (character) {
+                var keysym = keysymForCharacter(character);
+                sendKey(true, keysym);
+                sendKey(false, keysym);
+            });
+            setPanelStatus('Typed.', 'success');
+        });
+
+        panel.appendChild(actions);
+        panel.appendChild(status);
+
+        // Typing in the box must not reach the remote desktop. Guacamole
+        // listens on the document; stopping the events at the window first
+        // leaves typing into the box intact.
+        ['keydown', 'keypress', 'keyup', 'input',
+            'compositionstart', 'compositionupdate', 'compositionend'].forEach(function (type) {
+            window.addEventListener(type, function (e) {
+                if (panel.contains(e.target))
+                    e.stopPropagation();
+            }, true);
+        });
+
+        // Show text copied on the remote desktop, unless the user is editing
+        var watching = false;
+        function watchRemoteClipboard() {
+            var rootScope = !watching && guacamoleService('$rootScope');
+            if (!rootScope)
+                return watching;
+            watching = true;
+            rootScope.$on('guacClipboard', function (event, data) {
+                if (data.source && typeof data.data === 'string' && doc.activeElement !== text)
+                    text.value = data.data;
+            });
+            return true;
         }
 
-        // Next to the widget: above it when there is room, else below
-        function position() {
-            if (!isOpen())
-                return;
-            var anchor = widget.getBoundingClientRect();
-            var width = panel.offsetWidth;
-            var height = panel.offsetHeight;
-            var top = anchor.top - height - 8 >= 0 ? anchor.top - height - 8 : anchor.bottom + 8;
-            panel.style.left = clamp(anchor.right - width, 0, window.innerWidth - width) + 'px';
-            panel.style.top = clamp(top, 0, window.innerHeight - height) + 'px';
-        }
-
-        function hide() {
-            panel.classList.remove('visible');
-            releaseModifiers();
-        }
-
-        window.addEventListener('resize', position);
-
-        return {
-            toggle: function () {
-                if (isOpen())
-                    hide();
-                else {
-                    panel.classList.add('visible');
-                    position();
-                }
-            },
-            hide: hide,
-            position: position
+        var show = clipboard.show;
+        clipboard.show = function () {
+            setStatus(status);
+            show();
         };
+        clipboard.watchRemoteClipboard = watchRemoteClipboard;
+
+        return clipboard;
     }
 
     /* ---------------------------------------------------------------------
@@ -668,7 +835,23 @@
         keysButton.innerHTML = ICON_KEYBOARD;
         widget.appendChild(keysButton);
 
+        var clipboardButton = doc.createElement('button');
+        clipboardButton.type = 'button';
+        clipboardButton.className = 'clipboard-toggle';
+        clipboardButton.title = 'Clipboard';
+        clipboardButton.innerHTML = ICON_CLIPBOARD;
+        widget.appendChild(clipboardButton);
+
         var keys = createKeysPanel(widget);
+        var clipboard = createClipboardPanel(widget);
+        var panels = [keys, clipboard];
+
+        function togglePanel(panel) {
+            var open = panel.isOpen();
+            panels.forEach(function (other) { other.hide(); });
+            if (!open)
+                panel.show();
+        }
 
         var settingsButton = doc.createElement('button');
         settingsButton.type = 'button';
@@ -704,7 +887,7 @@
             dragging = true;
             widget.classList.add('dragging');
             placeWidget(widget, start.left + dx, start.top + dy);
-            keys.position();
+            panels.forEach(function (panel) { panel.position(); });
         });
 
         widget.addEventListener('pointerup', function (e) {
@@ -716,7 +899,9 @@
             else if (button && button.contains(start.target))
                 toggleFullscreen();
             else if (keysButton.contains(start.target))
-                keys.toggle();
+                togglePanel(keys);
+            else if (clipboardButton.contains(start.target))
+                togglePanel(clipboard);
             else if (settingsButton.contains(start.target))
                 settings.open();
             start = null;
@@ -745,7 +930,10 @@
         updatePing(meter, label);
         window.setInterval(function () { updatePing(meter, label); }, 1000);
 
-        widget.keys = keys;
+        widget.hidePanels = function () {
+            panels.forEach(function (panel) { panel.hide(); });
+        };
+        widget.watchRemoteClipboard = clipboard.watchRemoteClipboard;
         return widget;
     }
 
@@ -761,9 +949,16 @@
                 restorePosition(widget);
             else {
                 settings.hide();
-                widget.keys.hide();
+                widget.hidePanels();
             }
         }
+
+        // Guacamole's services exist once its app has started; wait for it
+        // to follow text copied on the remote desktop
+        var watcher = window.setInterval(function () {
+            if (widget.watchRemoteClipboard())
+                window.clearInterval(watcher);
+        }, 1000);
 
         window.addEventListener('hashchange', updateVisibility);
         updateVisibility();
