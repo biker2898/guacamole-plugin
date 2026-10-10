@@ -1,0 +1,21 @@
+# Per-user settings store for the session-tools extension.
+# Install: see "Per-user settings" in README.md.
+[Unit]
+Description=Guacamole session-tools settings store
+After=network.target
+
+[Service]
+# Set GUACAMOLE_URL (and optionally LISTEN) here, for example:
+#   GUACAMOLE_URL=http://127.0.0.1:8080/<WEBAPP_CONTEXT>
+EnvironmentFile=/etc/default/session-tools-prefs
+ExecStart=/usr/bin/python3 /usr/local/lib/session-tools-prefs/session-tools-prefs.py
+Restart=on-failure
+DynamicUser=yes
+StateDirectory=session-tools-prefs
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=multi-user.target

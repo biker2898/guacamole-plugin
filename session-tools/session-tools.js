@@ -26,8 +26,10 @@
 
     var STORAGE_KEY = 'session-tools-position';
     var RESOLUTION_KEY = 'session-tools-resolution';
-    var COOKIE_MAX_AGE = 10 * 365 * 24 * 3600;
     var DRAG_THRESHOLD = 6;
+
+    // Longest wait for the user's settings before connecting without them
+    var SETTINGS_TIMEOUT_MS = 4000;
 
     // Round-trip thresholds in milliseconds
     var GOOD_MS = 100;
@@ -52,6 +54,11 @@
     ];
 
     var MIN_PASSWORD_LENGTH = 8;
+
+    // Per-device switch for sending this device's clipboard automatically,
+    // and how often to look at it while switched on
+    var AUTO_CLIPBOARD_KEY = 'session-tools-clipboard-auto';
+    var AUTO_CLIPBOARD_MS = 1000;
 
     // X11 keysyms, as Guacamole sends them
     var KEY_CTRL = 0xFFE3;
@@ -112,8 +119,6 @@
     if (NativeWebSocket) {
         var WrappedWebSocket = function (url, protocols) {
             var isTunnel = /\/websocket-tunnel/.test(url);
-            if (isTunnel)
-                url = applyResolution(url);
             var socket = arguments.length > 1
                 ? new NativeWebSocket(url, protocols)
                 : new NativeWebSocket(url);
@@ -191,80 +196,140 @@
     /* ---------------------------------------------------------------------
      * Resolution
      *
-     * The browser sends the desired screen size when the tunnel connects
-     * (GUAC_WIDTH, GUAC_HEIGHT and GUAC_DPI in the WebSocket URL). A chosen
-     * resolution replaces those values, so it applies from the next
-     * connection on. Connections that set "width" and "height" themselves
-     * ignore it.
+     * The browser sends the desired screen size when it connects (GUAC_WIDTH,
+     * GUAC_HEIGHT and GUAC_DPI in the connect data). A chosen resolution
+     * replaces those values, so it applies from the next connection on.
+     * Connections that set "width" and "height" themselves ignore it.
      *
-     * The choice is kept in a cookie on the parent domain as well as in
-     * localStorage, so sites that share that domain (portal.example.com and
-     * portal2.example.com) share the choice too. The cookie holds "auto" for
-     * "fit browser window", so a later choice on one site overrides an older
-     * one from another.
+     * The choice is stored per Guacamole user on the server, by the
+     * session-tools-prefs service (prefs/ in this repository), so it follows
+     * the user to every browser and device.
      * ------------------------------------------------------------------- */
 
-    function readResolutionCookie() {
+    // Older versions kept the choice in the browser; it moves to the server
+    function readLegacyResolution() {
         var match = doc.cookie.match(new RegExp('(?:^|;\\s*)' + RESOLUTION_KEY + '=([^;]*)'));
-        return match ? match[1] : null;
-    }
-
-    function writeResolutionCookie(value) {
-        var attributes = '; path=/; max-age=' + COOKIE_MAX_AGE + '; samesite=lax'
-            + (window.location.protocol === 'https:' ? '; secure' : '');
-
-        // Widest domain the browser accepts; it refuses public suffixes
-        var parts = window.location.hostname.split('.');
-        for (var i = Math.max(parts.length - 2, 0); i > 0; i--) {
-            doc.cookie = RESOLUTION_KEY + '=' + value + '; domain=' + parts.slice(i).join('.') + attributes;
-            if (readResolutionCookie() === value)
-                return;
-        }
-        doc.cookie = RESOLUTION_KEY + '=' + value + attributes;
-    }
-
-    function savedResolution() {
-        var cookie = readResolutionCookie();
-        var match = cookie && /^(\d+)x(\d+)$/.exec(cookie);
         if (match)
-            return { width: parseInt(match[1], 10), height: parseInt(match[2], 10) };
-        if (cookie === 'auto')
-            return null;
+            return match[1];
         try {
             var saved = JSON.parse(localStorage.getItem(RESOLUTION_KEY));
             if (saved && saved.width > 0 && saved.height > 0)
-                return saved;
+                return saved.width + 'x' + saved.height;
         }
         catch (e) {}
         return null;
     }
 
-    function saveResolution(resolution) {
-        writeResolutionCookie(resolution ? resolution.width + 'x' + resolution.height : 'auto');
+    function clearLegacyResolution() {
+        var expired = RESOLUTION_KEY + '=; path=/; max-age=0';
+        var parts = window.location.hostname.split('.');
+        for (var i = 0; i < parts.length - 1; i++)
+            doc.cookie = expired + '; domain=' + parts.slice(i).join('.');
+        doc.cookie = expired;
         try {
-            if (resolution)
-                localStorage.setItem(RESOLUTION_KEY, JSON.stringify(resolution));
-            else
-                localStorage.removeItem(RESOLUTION_KEY);
+            localStorage.removeItem(RESOLUTION_KEY);
         }
         catch (e) {}
     }
 
-    function setQueryParam(url, name, value) {
-        var pattern = new RegExp('([?&]' + name + '=)[^&]*');
-        if (pattern.test(url))
-            return url.replace(pattern, '$1' + value);
-        return url + (url.indexOf('?') < 0 ? '?' : '&') + name + '=' + value;
+    function parseResolution(value) {
+        var match = /^(\d+)x(\d+)$/.exec(value || '');
+        return match ? { width: parseInt(match[1], 10), height: parseInt(match[2], 10) } : null;
     }
 
-    function applyResolution(url) {
-        var resolution = savedResolution();
+    function setQueryParam(url, name, value) {
+        var pattern = new RegExp('([?&]|^)(' + name + '=)[^&]*');
+        if (pattern.test(url))
+            return url.replace(pattern, '$1$2' + value);
+        return url + (url ? '&' : '') + name + '=' + value;
+    }
+
+    function applyResolution(data, resolution) {
         if (!resolution)
-            return url;
-        url = setQueryParam(url, 'GUAC_WIDTH', resolution.width);
-        url = setQueryParam(url, 'GUAC_HEIGHT', resolution.height);
+            return data;
+        data = setQueryParam(data, 'GUAC_WIDTH', resolution.width);
+        data = setQueryParam(data, 'GUAC_HEIGHT', resolution.height);
         // A fixed size is meant in real pixels; keep Windows at 100% scaling
-        return setQueryParam(url, 'GUAC_DPI', 96);
+        return setQueryParam(data, 'GUAC_DPI', 96);
+    }
+
+    /* ---------------------------------------------------------------------
+     * Per-user settings, stored by the session-tools-prefs service
+     * ------------------------------------------------------------------- */
+
+    var userSettings = null;
+
+    function settingsRequest(method, body) {
+
+        var auth = guacamoleService('authenticationService');
+        var token = auth && auth.getCurrentToken();
+        if (!token)
+            return Promise.reject(new Error('You are not signed in.'));
+
+        return fetch('session-tools/prefs?dataSource=' + encodeURIComponent(auth.getDataSource()), {
+            method: method,
+            headers: {
+                'Content-Type': 'application/json',
+                'Guacamole-Token': token
+            },
+            body: body ? JSON.stringify(body) : undefined
+        }).then(function (response) {
+            if (!response.ok)
+                throw new Error('Could not reach the settings service (HTTP ' + response.status + ').');
+            return response.json();
+        });
+    }
+
+    function saveSettings(changes) {
+        return settingsRequest('PUT', changes).then(function (settings) {
+            userSettings = { token: userSettings && userSettings.token, promise: Promise.resolve(settings) };
+            return settings;
+        });
+    }
+
+    // Settings of the signed-in user, fetched once per sign-in
+    function loadSettings() {
+
+        var auth = guacamoleService('authenticationService');
+        var token = auth && auth.getCurrentToken();
+        if (userSettings && userSettings.token === token)
+            return userSettings.promise;
+
+        var promise = settingsRequest('GET').then(function (settings) {
+            var legacy = readLegacyResolution();
+            if (!legacy)
+                return settings;
+            clearLegacyResolution();
+            return settings.resolution ? settings : saveSettings({ resolution: legacy });
+        }).catch(function () {
+            return {};
+        });
+        userSettings = { token: token, promise: promise };
+        return promise;
+    }
+
+    // Guacamole builds the connect data before it connects; hold the
+    // connection until the user's settings are known (at most a few seconds)
+    // and put the chosen resolution in. This covers the WebSocket tunnel
+    // and the HTTP fallback alike.
+    var NativeClient = window.Guacamole && window.Guacamole.Client;
+    if (NativeClient) {
+        var WrappedClient = function (tunnel) {
+            var client = new NativeClient(tunnel);
+            var connect = client.connect;
+            client.connect = function (data) {
+                var timeout = new Promise(function (resolve) { window.setTimeout(resolve, SETTINGS_TIMEOUT_MS, {}); });
+                Promise.race([loadSettings(), timeout]).then(function (settings) {
+                    connect.call(client, applyResolution(data || '', parseResolution(settings.resolution)));
+                });
+            };
+            return client;
+        };
+        WrappedClient.prototype = NativeClient.prototype;
+        Object.keys(NativeClient).forEach(function (name) {
+            WrappedClient[name] = NativeClient[name];
+        });
+        window.Guacamole.Client = WrappedClient;
     }
 
     /* ---------------------------------------------------------------------
@@ -370,7 +435,10 @@
             select.appendChild(optgroup);
         });
         resolutionForm.appendChild(select);
-        resolutionForm.appendChild(element('p', 'hint', 'Applying reconnects the session. Open programs stay open.'));
+        resolutionForm.appendChild(element('p', 'hint', 'Saved for your account on every device. Applying reconnects the session; open programs stay open.'));
+        var resolutionStatus = element('p', 'status');
+        resolutionStatus.setAttribute('aria-live', 'polite');
+        resolutionForm.appendChild(resolutionStatus);
         var apply = element('button', 'primary', 'Apply');
         apply.type = 'submit';
         resolutionForm.appendChild(apply);
@@ -392,10 +460,14 @@
         dialog.appendChild(passwordForm);
 
         function open() {
-            var resolution = savedResolution();
-            select.value = resolution ? resolution.width + 'x' + resolution.height : '';
-            if (select.selectedIndex < 0)
-                select.value = '';
+            select.disabled = true;
+            setStatus(resolutionStatus);
+            loadSettings().then(function (settings) {
+                select.value = parseResolution(settings.resolution) ? settings.resolution : '';
+                if (select.selectedIndex < 0)
+                    select.value = '';
+                select.disabled = false;
+            });
             passwordForm.reset();
             setStatus(status);
             overlay.classList.add('visible');
@@ -409,12 +481,15 @@
 
         resolutionForm.addEventListener('submit', function (e) {
             e.preventDefault();
-            var parts = select.value.split('x');
-            saveResolution(select.value
-                ? { width: parseInt(parts[0], 10), height: parseInt(parts[1], 10) }
-                : null);
-            // Reconnect so the new size is sent to the remote desktop
-            window.location.reload();
+            apply.disabled = true;
+            setStatus(resolutionStatus, 'Saving\u2026');
+            saveSettings({ resolution: select.value || 'auto' }).then(function () {
+                // Reconnect so the new size is sent to the remote desktop
+                window.location.reload();
+            }, function (error) {
+                setStatus(resolutionStatus, error.message, 'error');
+                apply.disabled = false;
+            });
         });
 
         passwordForm.addEventListener('submit', function (e) {
@@ -621,6 +696,11 @@
      * (optionally followed by Ctrl+V), or typed key by key for places that
      * ignore the clipboard. Text copied on the remote desktop shows up in
      * the box, to copy onto this device.
+     *
+     * A switch in the panel sends whatever is copied on this device to the
+     * remote clipboard automatically. It needs a browser that grants
+     * permanent clipboard access (Chrome, Edge, Chrome on Android); it is a
+     * per-device choice because that permission is.
      * ------------------------------------------------------------------- */
 
     // Keysym for a character: Latin-1 maps directly, the rest of Unicode
@@ -649,6 +729,14 @@
         text.placeholder = 'Paste or type text here, then send it to the remote computer.';
         panel.appendChild(text);
 
+        var autoLabel = element('label', 'auto');
+        var autoSwitch = element('input');
+        autoSwitch.type = 'checkbox';
+        autoLabel.appendChild(autoSwitch);
+        autoLabel.appendChild(doc.createTextNode('Auto-send what I copy on this device'));
+        autoLabel.title = 'Text copied on this device goes to the remote clipboard by itself; paste it there with Ctrl+V';
+        panel.appendChild(autoLabel);
+
         var status = element('p', 'status');
         status.setAttribute('aria-live', 'polite');
 
@@ -657,12 +745,16 @@
             clipboard.position();
         }
 
-        function sendToRemote() {
+        // Newest text seen on either side, so nothing is sent back and forth
+        var lastText = null;
+
+        function sendToRemote(value) {
             var service = guacamoleService('clipboardService');
             var ClipboardData = guacamoleService('ClipboardData');
             if (!service || !ClipboardData)
                 return Promise.reject();
-            return service.setClipboard(new ClipboardData({ type: 'text/plain', data: text.value }));
+            lastText = value;
+            return service.setClipboard(new ClipboardData({ type: 'text/plain', data: value }));
         }
 
         var actions = element('div', 'actions');
@@ -694,7 +786,7 @@
         });
 
         addButton(actions, 'Send', 'Put the text on the remote clipboard', function () {
-            sendToRemote().then(function () {
+            sendToRemote(text.value).then(function () {
                 setPanelStatus('Sent. Paste it on the remote computer with Ctrl+V.', 'success');
             }, function () {
                 setPanelStatus('Not connected.', 'error');
@@ -702,7 +794,7 @@
         });
 
         addButton(actions, 'Send + paste', 'Put the text on the remote clipboard and press Ctrl+V', function () {
-            sendToRemote().then(function () {
+            sendToRemote(text.value).then(function () {
                 // Give the remote clipboard a moment to update before pasting
                 window.setTimeout(function () {
                     sendKey(true, KEY_CTRL);
@@ -747,11 +839,99 @@
                 return watching;
             watching = true;
             rootScope.$on('guacClipboard', function (event, data) {
-                if (data.source && typeof data.data === 'string' && doc.activeElement !== text)
+                if (!data.source || typeof data.data !== 'string')
+                    return;
+                lastText = data.data;
+                if (doc.activeElement !== text)
                     text.value = data.data;
             });
             return true;
         }
+
+        /* Auto-send */
+
+        function readPermission() {
+            if (!navigator.permissions || !navigator.permissions.query)
+                return Promise.resolve('unsupported');
+            return navigator.permissions.query({ name: 'clipboard-read' }).then(function (result) {
+                return result.state;
+            }, function () {
+                return 'unsupported';
+            });
+        }
+
+        function saveAutoSwitch() {
+            try {
+                localStorage.setItem(AUTO_CLIPBOARD_KEY, autoSwitch.checked ? '1' : '0');
+            }
+            catch (e) {}
+        }
+
+        function disableAuto(message) {
+            autoSwitch.checked = false;
+            saveAutoSwitch();
+            setPanelStatus(message, 'error');
+        }
+
+        // Reads this device's clipboard and sends it when it has changed
+        var reading = false;
+        function syncFromDevice() {
+            if (reading)
+                return Promise.resolve();
+            reading = true;
+            return navigator.clipboard.readText().then(function (value) {
+                reading = false;
+                if (!value || value === lastText)
+                    return;
+                if (doc.activeElement !== text)
+                    text.value = value;
+                return sendToRemote(value).then(function () {
+                    setPanelStatus('Copied text sent. Paste it on the remote computer with Ctrl+V.', 'success');
+                }, function () {});
+            }, function (error) {
+                reading = false;
+                throw error;
+            });
+        }
+
+        // Only while a session is open and this page is in front; reading
+        // the clipboard of a background page fails anyway
+        function autoTick() {
+            if (!autoSwitch.checked || reading || doc.visibilityState !== 'visible' || !doc.hasFocus()
+                    || !/^#\/client\//.test(window.location.hash))
+                return;
+            readPermission().then(function (state) {
+                if (state === 'granted' && autoSwitch.checked)
+                    syncFromDevice().catch(function () {});
+            });
+        }
+
+        autoSwitch.addEventListener('change', function () {
+            saveAutoSwitch();
+            setPanelStatus();
+            if (!autoSwitch.checked)
+                return;
+            if (!navigator.clipboard || !navigator.clipboard.readText)
+                return disableAuto('This browser cannot read the clipboard. Use "From device" instead.');
+            // A tap is when the browser may ask for permission; ask now
+            lastText = null;
+            syncFromDevice().then(readPermission).then(function (state) {
+                if (state !== 'granted')
+                    disableAuto('This browser allows reading the clipboard only on a tap. Use "From device" instead.');
+                else if (!status.textContent)
+                    setPanelStatus('On. Text you copy on this device is sent automatically.', 'success');
+            }, function () {
+                disableAuto('The browser did not allow reading the clipboard. Allow it in the site settings, then try again.');
+            });
+        });
+
+        try {
+            autoSwitch.checked = localStorage.getItem(AUTO_CLIPBOARD_KEY) === '1';
+        }
+        catch (e) {}
+        window.setInterval(autoTick, AUTO_CLIPBOARD_MS);
+        window.addEventListener('focus', autoTick);
+        doc.addEventListener('visibilitychange', autoTick);
 
         var show = clipboard.show;
         clipboard.show = function () {

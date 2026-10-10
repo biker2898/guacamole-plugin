@@ -26,13 +26,19 @@ A floating, draggable widget on every remote session:
   "Send + paste" to also press Ctrl+V, or "Type" it key by key where pasting
   is blocked (for example the Windows login screen). Text copied on the
   remote desktop appears in the box; "Copy to device" copies it onto this
-  device.
+  device. The "Auto-send what I copy on this device" switch sends text
+  copied on the device to the remote clipboard by itself, ready for Ctrl+V.
+  It works in browsers that grant lasting clipboard access (Chrome, Edge,
+  Chrome on Android), asks for that permission when switched on, and is
+  remembered per device.
 - **Settings button**: opens a dialog with two settings:
   - *Screen resolution*: "Fit browser window" (Guacamole's default) or a
-    fixed 16:9 or 16:10 size such as 1920 × 1080 or 1280 × 800. Applying it reconnects the session; the
-    choice is remembered per browser, and shared by sites on the same parent
-    domain (for example portal.example.com and portal2.example.com). Connections that set their own
-    `width` and `height` parameters ignore it.
+    fixed 16:9 or 16:10 size such as 1920 × 1080 or 1280 × 800. Applying it
+    reconnects the session. The choice is stored per Guacamole user on the
+    server (see [Per-user settings](#per-user-settings)), so it follows the
+    user to every browser and device. Without that service the session uses
+    "Fit browser window". Connections that set their own `width` and
+    `height` parameters ignore it.
   - *Change password*: changes the user's Guacamole password. The account
     needs the "change own password" permission (UPDATE on its own user);
     otherwise the server refuses the change.
@@ -79,6 +85,30 @@ checks the log that each extension loaded.
 
 After editing anything here, run `./install.sh` again and reload the Guacamole
 page with Ctrl+F5.
+
+## Per-user settings
+
+Guacamole keeps no settings of its own for a non-admin user, so the chosen
+resolution is stored by a small service in `prefs/`
+(`session-tools-prefs.py`, Python standard library only). Each request
+carries the user's Guacamole token; the service asks Guacamole whose token it
+is and reads or writes only that user's settings, in
+`/var/lib/session-tools-prefs/`.
+
+Install it once on the Guacamole server (replace `SECRET_PATH` with the
+`WEBAPP_CONTEXT` value, or `guacamole` if none is set):
+
+```sh
+sudo install -D -m 644 prefs/session-tools-prefs.py /usr/local/lib/session-tools-prefs/session-tools-prefs.py
+sudo install -m 644 prefs/session-tools-prefs.service /etc/systemd/system/
+echo 'GUACAMOLE_URL=http://127.0.0.1:8080/SECRET_PATH' | sudo tee /etc/default/session-tools-prefs
+sudo systemctl daemon-reload && sudo systemctl enable --now session-tools-prefs
+```
+
+Then let nginx pass `<path>/session-tools/prefs` to it, as in
+`examples/nginx/guacamole-locations.conf`, and reload nginx. After editing
+`session-tools-prefs.py`, copy it again and run
+`sudo systemctl restart session-tools-prefs`.
 
 ## Uninstall
 
@@ -146,5 +176,6 @@ up in Windows Explorer and gives the product away.
 
 - `session-tools/`: ping meter, fullscreen, keys, clipboard and settings extension (manifest, JS, CSS).
 - `branding/`: branding extension sources and `build.py`, which builds the jar.
+- `prefs/`: per-user settings service and its systemd unit.
 - `install.sh`: builds and installs both extensions.
 - `examples/nginx/`: optional nginx hardening.
