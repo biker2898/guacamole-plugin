@@ -26,8 +26,9 @@ A floating, draggable widget on every remote session:
   "Send + paste" to also press Ctrl+V, or "Type" it key by key where pasting
   is blocked (for example the Windows login screen). Text copied on the
   remote desktop appears in the box; "Copy to device" copies it onto this
-  device. The "Auto-send what I copy on this device" switch sends text
-  copied on the device to the remote clipboard by itself, ready for Ctrl+V.
+  device. The "Auto-paste what I copy on this device" switch sends text
+  copied on the device to the remote clipboard by itself and presses Ctrl+V,
+  so it lands wherever the cursor is on the remote desktop.
   It works in browsers that grant lasting clipboard access (Chrome, Edge,
   Chrome on Android), asks for that permission when switched on, and is
   remembered per device.

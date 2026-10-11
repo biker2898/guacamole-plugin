@@ -698,7 +698,8 @@
      * the box, to copy onto this device.
      *
      * A switch in the panel sends whatever is copied on this device to the
-     * remote clipboard automatically. It needs a browser that grants
+     * remote clipboard automatically and pastes it (Ctrl+V) into whatever
+     * has focus on the remote desktop. It needs a browser that grants
      * permanent clipboard access (Chrome, Edge, Chrome on Android); it is a
      * per-device choice because that permission is.
      * ------------------------------------------------------------------- */
@@ -733,8 +734,8 @@
         var autoSwitch = element('input');
         autoSwitch.type = 'checkbox';
         autoLabel.appendChild(autoSwitch);
-        autoLabel.appendChild(doc.createTextNode('Auto-send what I copy on this device'));
-        autoLabel.title = 'Text copied on this device goes to the remote clipboard by itself; paste it there with Ctrl+V';
+        autoLabel.appendChild(doc.createTextNode('Auto-paste what I copy on this device'));
+        autoLabel.title = 'Text copied on this device is sent to the remote computer and pasted (Ctrl+V) where the cursor is';
         panel.appendChild(autoLabel);
 
         var status = element('p', 'status');
@@ -755,6 +756,17 @@
                 return Promise.reject();
             lastText = value;
             return service.setClipboard(new ClipboardData({ type: 'text/plain', data: value }));
+        }
+
+        // Ctrl+V on the remote desktop, once the remote clipboard has had a
+        // moment to update
+        function pasteOnRemote() {
+            window.setTimeout(function () {
+                sendKey(true, KEY_CTRL);
+                sendKey(true, 0x76);
+                sendKey(false, 0x76);
+                sendKey(false, KEY_CTRL);
+            }, 300);
         }
 
         var actions = element('div', 'actions');
@@ -795,13 +807,7 @@
 
         addButton(actions, 'Send + paste', 'Put the text on the remote clipboard and press Ctrl+V', function () {
             sendToRemote(text.value).then(function () {
-                // Give the remote clipboard a moment to update before pasting
-                window.setTimeout(function () {
-                    sendKey(true, KEY_CTRL);
-                    sendKey(true, 0x76);
-                    sendKey(false, 0x76);
-                    sendKey(false, KEY_CTRL);
-                }, 300);
+                pasteOnRemote();
                 setPanelStatus('Sent and pasted.', 'success');
             }, function () {
                 setPanelStatus('Not connected.', 'error');
@@ -848,7 +854,7 @@
             return true;
         }
 
-        /* Auto-send */
+        /* Auto-paste */
 
         function readPermission() {
             if (!navigator.permissions || !navigator.permissions.query)
@@ -873,7 +879,8 @@
             setPanelStatus(message, 'error');
         }
 
-        // Reads this device's clipboard and sends it when it has changed
+        // Reads this device's clipboard and, when it has changed, sends and
+        // pastes it
         var reading = false;
         function syncFromDevice() {
             if (reading)
@@ -886,7 +893,8 @@
                 if (doc.activeElement !== text)
                     text.value = value;
                 return sendToRemote(value).then(function () {
-                    setPanelStatus('Copied text sent. Paste it on the remote computer with Ctrl+V.', 'success');
+                    pasteOnRemote();
+                    setPanelStatus('Copied text pasted on the remote computer.', 'success');
                 }, function () {});
             }, function (error) {
                 reading = false;
@@ -919,7 +927,7 @@
                 if (state !== 'granted')
                     disableAuto('This browser allows reading the clipboard only on a tap. Use "From device" instead.');
                 else if (!status.textContent)
-                    setPanelStatus('On. Text you copy on this device is sent automatically.', 'success');
+                    setPanelStatus('On. Text you copy on this device is pasted automatically.', 'success');
             }, function () {
                 disableAuto('The browser did not allow reading the clipboard. Allow it in the site settings, then try again.');
             });
