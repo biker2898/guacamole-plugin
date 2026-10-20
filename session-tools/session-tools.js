@@ -17,6 +17,10 @@
  *    clipboard or type it, and to copy remote text onto this device, for
  *    browsers (such as on Android) where the automatic clipboard sync fails.
  *
+ *  - A files button. It opens a panel to upload files from this device to
+ *    the drive the connection shares with the remote computer, and to
+ *    download files from it.
+ *
  *  - A settings button. It opens a dialog to pick the screen resolution of
  *    the remote desktop and to change the user's Guacamole password.
  *
@@ -69,7 +73,9 @@
 
     var ICON_CLIPBOARD = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">'
         + '<rect x="8" y="2" width="8" height="4" rx="1"/><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/></svg>';
-    var ICON_KEYBOARD = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">'
+    var ICON_FOLDER = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">'
+        + '<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M12 11v6M9 14l3-3 3 3"/></svg>';
+    var ICON_KEYBOARD ='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">'
         + '<rect x="2" y="5" width="20" height="14" rx="2"/><path d="M6 9h.01M10 9h.01M14 9h.01M18 9h.01M6 13h.01M18 13h.01M10 13h4M7 16h10"/></svg>';
 
     var ICON_SETTINGS = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">'
@@ -952,6 +958,222 @@
     }
 
     /* ---------------------------------------------------------------------
+     * Files panel
+     *
+     * Browses the drive the connection shares with the remote computer
+     * (for RDP: "Enable drive" under Device Redirection), through the same
+     * Guacamole calls as the file browser in its Ctrl+Alt+Shift menu.
+     * Upload sends files from this device into the folder shown; a click on
+     * a file downloads it. Guacamole shows upload progress in its own
+     * transfer dialog.
+     * ------------------------------------------------------------------- */
+
+    // Client of the session on screen; with several tiled sessions, the
+    // focused one
+    function currentClient() {
+        var match = /^#\/client\/([^?\/]+)/.exec(window.location.hash);
+        var manager = match && guacamoleService('guacClientManager');
+        if (!manager)
+            return null;
+        var id = decodeURIComponent(match[1]);
+        var groups = manager.getManagedClientGroups().filter(function (group) {
+            return group.clients.map(function (client) { return client.id; }).join('.') === id;
+        });
+        if (!groups.length || !groups[0].clients.length)
+            return null;
+        var clients = groups[0].clients;
+        return clients.filter(function (client) { return client.clientProperties.focused; })[0] || clients[0];
+    }
+
+    function createFilesPanel(widget) {
+
+        var files = createPanel(widget, 'session-tools-files');
+        var panel = files.element;
+
+        var title = element('div', 'title', 'Files');
+        panel.appendChild(title);
+
+        var bar = element('div', 'location');
+        var up = addButton(bar, '\u2191', 'Up one folder', function () {
+            if (filesystem && filesystem.currentDirectory.parent)
+                openDirectory(filesystem.currentDirectory.parent);
+        });
+        var path = element('span', 'path');
+        bar.appendChild(path);
+        panel.appendChild(bar);
+
+        var list = element('ul', 'list');
+        panel.appendChild(list);
+
+        var picker = element('input');
+        picker.type = 'file';
+        picker.multiple = true;
+        picker.hidden = true;
+        panel.appendChild(picker);
+
+        var actions = element('div', 'actions');
+        var upload = addButton(actions, 'Upload', 'Send files from this device to the folder shown', function () {
+            picker.click();
+        });
+        var refresh = addButton(actions, 'Refresh', 'Reload the folder', function () {
+            if (filesystem)
+                openDirectory(filesystem.currentDirectory);
+        });
+        panel.appendChild(actions);
+
+        var status = element('p', 'status');
+        status.setAttribute('aria-live', 'polite');
+        panel.appendChild(status);
+
+        var hint = element('p', 'hint');
+        panel.appendChild(hint);
+
+        function setPanelStatus(message, state) {
+            setStatus(status, message, state);
+            files.position();
+        }
+
+        // Session and drive on display, and the folder listing last drawn
+        var client = null;
+        var filesystem = null;
+        var shownFiles = null;
+
+        function openDirectory(directory) {
+            var ManagedFilesystem = guacamoleService('ManagedFilesystem');
+            if (ManagedFilesystem)
+                ManagedFilesystem.changeDirectory(filesystem, directory);
+            shownFiles = null;
+            render();
+        }
+
+        function directoryPath(directory) {
+            var names = [];
+            for (var node = directory; node && node.parent; node = node.parent)
+                names.unshift(node.name);
+            return filesystem.name + (names.length ? ' / ' + names.join(' / ') : '');
+        }
+
+        function render() {
+
+            var connected = !!(client && filesystem);
+            upload.disabled = refresh.disabled = !connected;
+            up.disabled = !connected || !filesystem.currentDirectory.parent;
+            bar.hidden = !connected;
+            list.hidden = !connected;
+            if (!connected) {
+                hint.textContent = client
+                    ? 'This connection has no shared drive. Ask your administrator to enable one.'
+                    : 'Not connected.';
+                files.position();
+                return;
+            }
+
+            hint.textContent = 'To get a file from the remote computer, copy it into '
+                + filesystem.name + ' there, then click it here. Files put in its Download folder download by themselves.';
+
+            var directory = filesystem.currentDirectory;
+            path.textContent = directoryPath(directory);
+            path.title = path.textContent;
+            shownFiles = directory.files;
+            list.textContent = '';
+
+            var entries = Object.keys(shownFiles).map(function (name) { return shownFiles[name]; });
+            entries.sort(function (a, b) {
+                var aFolder = a.type === 'DIRECTORY', bFolder = b.type === 'DIRECTORY';
+                return aFolder !== bFolder ? (aFolder ? -1 : 1) : a.name.localeCompare(b.name);
+            });
+
+            if (!entries.length)
+                list.appendChild(element('li', 'empty', 'This folder is empty.'));
+
+            entries.forEach(function (file) {
+                var folder = file.type === 'DIRECTORY';
+                var item = element('li', folder ? 'folder' : 'file');
+                addButton(item, file.name + (folder ? '/' : ''),
+                    folder ? 'Open ' + file.name : 'Download ' + file.name, function () {
+                        if (folder)
+                            return openDirectory(file);
+                        var ManagedFilesystem = guacamoleService('ManagedFilesystem');
+                        if (!ManagedFilesystem)
+                            return;
+                        ManagedFilesystem.downloadFile(filesystem, file.streamName);
+                        setPanelStatus('Downloading ' + file.name + '\u2026');
+                    });
+                list.appendChild(item);
+            });
+
+            files.position();
+        }
+
+        // Pick up the session's drive, and folder contents as they arrive
+        function poll() {
+            if (!files.isOpen())
+                return;
+            var next = currentClient();
+            var nextFilesystem = next && next.filesystems.length ? next.filesystems[0] : null;
+            if (next !== client || nextFilesystem !== filesystem) {
+                client = next;
+                filesystem = nextFilesystem;
+                render();
+            }
+            else if (filesystem && filesystem.currentDirectory.files !== shownFiles)
+                render();
+        }
+
+        picker.addEventListener('change', function () {
+            var chosen = Array.from(picker.files);
+            picker.value = '';
+            var ManagedClient = guacamoleService('ManagedClient');
+            var rootScope = guacamoleService('$rootScope');
+            if (!chosen.length || !client || !filesystem || !ManagedClient || !rootScope)
+                return;
+            var directory = filesystem.currentDirectory;
+            rootScope.$evalAsync(function () {
+                chosen.forEach(function (file) {
+                    ManagedClient.uploadFile(client, file, filesystem, directory);
+                });
+            });
+            setPanelStatus(chosen.length === 1
+                ? 'Uploading ' + chosen[0].name + '\u2026'
+                : 'Uploading ' + chosen.length + ' files\u2026');
+        });
+
+        // Show finished uploads in the listing
+        var watching = false;
+        function watchUploads() {
+            var rootScope = !watching && guacamoleService('$rootScope');
+            if (!rootScope)
+                return watching;
+            watching = true;
+            rootScope.$on('guacUploadComplete', function (event, name) {
+                if (!files.isOpen() || !filesystem)
+                    return;
+                setPanelStatus('Uploaded ' + name + '.', 'success');
+                openDirectory(filesystem.currentDirectory);
+            });
+            return true;
+        }
+
+        window.setInterval(poll, 500);
+
+        var show = files.show;
+        files.show = function () {
+            setStatus(status);
+            client = currentClient();
+            filesystem = client && client.filesystems.length ? client.filesystems[0] : null;
+            show();
+            // Fresh listing each time the panel opens
+            if (filesystem)
+                openDirectory(filesystem.currentDirectory);
+            else
+                render();
+        };
+        files.watchUploads = watchUploads;
+
+        return files;
+    }
+
+    /* ---------------------------------------------------------------------
      * Widget placement
      * ------------------------------------------------------------------- */
 
@@ -1030,9 +1252,17 @@
         clipboardButton.innerHTML = ICON_CLIPBOARD;
         widget.appendChild(clipboardButton);
 
+        var filesButton = doc.createElement('button');
+        filesButton.type = 'button';
+        filesButton.className = 'files-toggle';
+        filesButton.title = 'Files (upload and download)';
+        filesButton.innerHTML = ICON_FOLDER;
+        widget.appendChild(filesButton);
+
         var keys = createKeysPanel(widget);
         var clipboard = createClipboardPanel(widget);
-        var panels = [keys, clipboard];
+        var files = createFilesPanel(widget);
+        var panels = [keys, clipboard, files];
 
         function togglePanel(panel) {
             var open = panel.isOpen();
@@ -1090,6 +1320,8 @@
                 togglePanel(keys);
             else if (clipboardButton.contains(start.target))
                 togglePanel(clipboard);
+            else if (filesButton.contains(start.target))
+                togglePanel(files);
             else if (settingsButton.contains(start.target))
                 settings.open();
             start = null;
@@ -1122,6 +1354,7 @@
             panels.forEach(function (panel) { panel.hide(); });
         };
         widget.watchRemoteClipboard = clipboard.watchRemoteClipboard;
+        widget.watchUploads = files.watchUploads;
         return widget;
     }
 
@@ -1142,9 +1375,10 @@
         }
 
         // Guacamole's services exist once its app has started; wait for it
-        // to follow text copied on the remote desktop
+        // to follow text copied on the remote desktop and finished uploads
         var watcher = window.setInterval(function () {
-            if (widget.watchRemoteClipboard())
+            var clipboardWatched = widget.watchRemoteClipboard();
+            if (widget.watchUploads() && clipboardWatched)
                 window.clearInterval(watcher);
         }, 1000);
 

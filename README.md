@@ -32,6 +32,13 @@ A floating, draggable widget on every remote session:
   It works in browsers that grant lasting clipboard access (Chrome, Edge,
   Chrome on Android), asks for that permission when switched on, and is
   remembered per device.
+- **Files button**: opens a panel that lists the drive the connection
+  shares with the remote computer (see
+  [Shared drive for RDP](#shared-drive-for-rdp-optional)). "Upload" sends
+  files from this device into the folder shown; a click on a folder opens
+  it, and a click on a file downloads it. Guacamole shows upload progress in
+  its own transfer dialog. Connections without a shared drive show a note
+  instead.
 - **Settings button**: opens a dialog with two settings:
   - *Screen resolution*: "Fit browser window" (Guacamole's default) or a
     fixed 16:9 or 16:10 size such as 1920 × 1080 or 1280 × 800. Applying it
@@ -165,17 +172,25 @@ remote Windows session, for file transfer in both directions.
    |-----------------------|----------------------------------------|
    | Enable drive          | checked                                |
    | Drive name            | a neutral name, e.g. `WORKDRIVE`       |
-   | Drive path            | `/drive/shared`                        |
+   | Drive path            | `/drive/${GUAC_USERNAME}`              |
    | Automatically create drive | checked                           |
 
-`/drive/shared` is one folder shared by every user of the connection. For a
-private folder per Guacamole user, use `/drive/${GUAC_USERNAME}` instead.
+`/drive/${GUAC_USERNAME}` gives each Guacamole user a private folder, on
+every connection they open. A fixed path such as `/drive/shared` is instead
+one folder shared by every user of the connection.
+
+Users transfer files with the files button of the session-tools widget:
+Upload sends files from their device into the drive, and a click on a file
+downloads it. Files copied into the drive's `Download` folder on the remote
+computer download by themselves. nginx limits the size of an upload
+(`client_max_body_size` in `guacamole-proxy.conf`), and so does Cloudflare
+when it proxies the site (100 MB on the free plan).
 Avoid the drive name `Guacamole` when using the branding extension: it shows
 up in Windows Explorer and gives the product away.
 
 ## Files
 
-- `session-tools/`: ping meter, fullscreen, keys, clipboard and settings extension (manifest, JS, CSS).
+- `session-tools/`: ping meter, fullscreen, keys, clipboard, files and settings extension (manifest, JS, CSS).
 - `branding/`: branding extension sources and `build.py`, which builds the jar.
 - `prefs/`: per-user settings service and its systemd unit.
 - `install.sh`: builds and installs both extensions.
