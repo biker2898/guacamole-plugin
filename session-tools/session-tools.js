@@ -21,6 +21,10 @@
  *    the drive the connection shares with the remote computer, and to
  *    download files from it.
  *
+ *  - A sound button. It turns the remote computer's sound on or off for
+ *    the user's account. Sound streams uncompressed, so turning it off saves
+ *    bandwidth on slow links. Switching reconnects the session.
+ *
  *  - A settings button. It opens a dialog to pick the screen resolution of
  *    the remote desktop and to change the user's Guacamole password.
  *
@@ -77,6 +81,11 @@
         + '<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M12 11v6M9 14l3-3 3 3"/></svg>';
     var ICON_KEYBOARD ='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">'
         + '<rect x="2" y="5" width="20" height="14" rx="2"/><path d="M6 9h.01M10 9h.01M14 9h.01M18 9h.01M6 13h.01M18 13h.01M10 13h4M7 16h10"/></svg>';
+
+    var ICON_SOUND_ON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">'
+        + '<path d="M11 5 6 9H2v6h4l5 4z"/><path d="M15.5 8.5a5 5 0 0 1 0 7M19 5a10 10 0 0 1 0 14"/></svg>';
+    var ICON_SOUND_OFF = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">'
+        + '<path d="M11 5 6 9H2v6h4l5 4z"/><path d="M23 9l-6 6M17 9l6 6"/></svg>';
 
     var ICON_SETTINGS = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">'
         + '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>';
@@ -260,6 +269,27 @@
     }
 
     /* ---------------------------------------------------------------------
+     * Sound
+     *
+     * The browser lists the audio formats it can play when it connects
+     * (GUAC_AUDIO in the connect data). With none listed, guacd sends no
+     * sound at all, which saves the bandwidth of the uncompressed stream.
+     * Like the resolution, the choice is stored per user.
+     * ------------------------------------------------------------------- */
+
+    function soundEnabled(settings) {
+        return settings.audio !== 'off';
+    }
+
+    function applySound(data, enabled) {
+        if (enabled)
+            return data;
+        return data.split('&').filter(function (param) {
+            return param.indexOf('GUAC_AUDIO=') !== 0;
+        }).join('&');
+    }
+
+    /* ---------------------------------------------------------------------
      * Per-user settings, stored by the session-tools-prefs service
      * ------------------------------------------------------------------- */
 
@@ -316,7 +346,7 @@
 
     // Guacamole builds the connect data before it connects; hold the
     // connection until the user's settings are known (at most a few seconds)
-    // and put the chosen resolution in. This covers the WebSocket tunnel
+    // and put the chosen resolution and sound setting in. This covers the WebSocket tunnel
     // and the HTTP fallback alike.
     var NativeClient = window.Guacamole && window.Guacamole.Client;
     if (NativeClient) {
@@ -326,7 +356,8 @@
             client.connect = function (data) {
                 var timeout = new Promise(function (resolve) { window.setTimeout(resolve, SETTINGS_TIMEOUT_MS, {}); });
                 Promise.race([loadSettings(), timeout]).then(function (settings) {
-                    connect.call(client, applyResolution(data || '', parseResolution(settings.resolution)));
+                    data = applyResolution(data || '', parseResolution(settings.resolution));
+                    connect.call(client, applySound(data, soundEnabled(settings)));
                 });
             };
             return client;
@@ -1259,6 +1290,39 @@
         filesButton.innerHTML = ICON_FOLDER;
         widget.appendChild(filesButton);
 
+        var soundButton = doc.createElement('button');
+        soundButton.type = 'button';
+        soundButton.className = 'sound-toggle';
+        widget.appendChild(soundButton);
+
+        function showSound(enabled) {
+            soundButton.innerHTML = enabled ? ICON_SOUND_ON : ICON_SOUND_OFF;
+            soundButton.classList.toggle('off', !enabled);
+            soundButton.title = enabled
+                ? 'Sound on. Turn it off to save bandwidth (reconnects)'
+                : 'Sound off. Turn it on (reconnects)';
+        }
+
+        var soundOn = true;
+        showSound(soundOn);
+        loadSettings().then(function (saved) {
+            soundOn = soundEnabled(saved);
+            showSound(soundOn);
+        });
+
+        function toggleSound() {
+            if (soundButton.disabled)
+                return;
+            soundButton.disabled = true;
+            saveSettings({ audio: soundOn ? 'off' : 'on' }).then(function () {
+                // Reconnect so the remote computer starts or stops the sound
+                window.location.reload();
+            }, function (error) {
+                soundButton.title = error.message;
+                soundButton.disabled = false;
+            });
+        }
+
         var keys = createKeysPanel(widget);
         var clipboard = createClipboardPanel(widget);
         var files = createFilesPanel(widget);
@@ -1322,6 +1386,8 @@
                 togglePanel(clipboard);
             else if (filesButton.contains(start.target))
                 togglePanel(files);
+            else if (soundButton.contains(start.target))
+                toggleSound();
             else if (settingsButton.contains(start.target))
                 settings.open();
             start = null;

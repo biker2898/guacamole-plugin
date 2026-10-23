@@ -58,6 +58,7 @@
 #session-tools .keys-toggle,
 #session-tools .clipboard-toggle,
 #session-tools .files-toggle,
+#session-tools .sound-toggle,
 #session-tools .settings {
     width: 36px;
     min-width: 0;
@@ -77,6 +78,7 @@
 #session-tools .keys-toggle:hover,
 #session-tools .clipboard-toggle:hover,
 #session-tools .files-toggle:hover,
+#session-tools .sound-toggle:hover,
 #session-tools .settings:hover {
     background: rgba(255, 255, 255, 0.25);
 }
@@ -85,10 +87,15 @@
 #session-tools .keys-toggle svg,
 #session-tools .clipboard-toggle svg,
 #session-tools .files-toggle svg,
+#session-tools .sound-toggle svg,
 #session-tools .settings svg {
     width: 20px;
     height: 20px;
     pointer-events: none;
+}
+
+#session-tools .sound-toggle.off {
+    color: #f44336;
 }
 
 /* Panels next to the widget */
