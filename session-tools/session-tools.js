@@ -21,9 +21,10 @@
  *    the drive the connection shares with the remote computer, and to
  *    download files from it.
  *
- *  - A sound button. It turns the remote computer's sound on or off for
- *    the user's account. Sound streams uncompressed, so turning it off saves
- *    bandwidth on slow links. Switching reconnects the session.
+ *  - A sound button. It opens a panel to turn the remote computer's sound
+ *    on or off for the user's account. Sound streams uncompressed, so
+ *    turning it off saves bandwidth on slow links. Switching reconnects the
+ *    session, so it takes a click in the panel, not just the button.
  *
  *  - A settings button. It opens a dialog to pick the screen resolution of
  *    the remote desktop and to change the user's Guacamole password.
@@ -288,6 +289,22 @@
             return param.indexOf('GUAC_AUDIO=') !== 0;
         }).join('&');
     }
+
+    // Browsers start an AudioContext created before the first click or key
+    // press on the page suspended, and Guacamole never resumes the one it
+    // plays sound through. A page loaded straight into a session (after a
+    // reload, or a switch of sound or resolution) would stay silent, so
+    // resume it on the first interaction.
+    function resumeSound() {
+        var factory = window.Guacamole && window.Guacamole.AudioContextFactory;
+        var context = factory && factory.singleton;
+        if (context && context.state === 'suspended')
+            context.resume().catch(function () {});
+    }
+
+    ['pointerdown', 'mousedown', 'touchend', 'keydown'].forEach(function (type) {
+        window.addEventListener(type, resumeSound, true);
+    });
 
     /* ---------------------------------------------------------------------
      * Per-user settings, stored by the session-tools-prefs service
@@ -1138,6 +1155,7 @@
 
         // Pick up the session's drive, and folder contents as they arrive
         function poll() {
+            checkUploads();
             if (!files.isOpen())
                 return;
             var next = currentClient();
@@ -1159,15 +1177,32 @@
             if (!chosen.length || !client || !filesystem || !ManagedClient || !rootScope)
                 return;
             var directory = filesystem.currentDirectory;
+            var target = client;
             rootScope.$evalAsync(function () {
+                var started = target.uploads.length;
                 chosen.forEach(function (file) {
-                    ManagedClient.uploadFile(client, file, filesystem, directory);
+                    ManagedClient.uploadFile(target, file, filesystem, directory);
                 });
+                pending = pending.concat(target.uploads.slice(started));
             });
             setPanelStatus(chosen.length === 1
                 ? 'Uploading ' + chosen[0].name + '\u2026'
                 : 'Uploading ' + chosen.length + ' files\u2026');
         });
+
+        // Uploads started from this panel that have not finished yet
+        var pending = [];
+
+        // Report uploads that failed; Guacamole's transfer dialog has details
+        function checkUploads() {
+            pending = pending.filter(function (upload) {
+                var state = upload.transferState.streamState;
+                if (state === 'ERROR')
+                    setPanelStatus('Could not upload ' + upload.filename
+                        + '. The file may be too large, or the drive full.', 'error');
+                return state !== 'ERROR' && state !== 'CLOSED';
+            });
+        }
 
         // Show finished uploads in the listing
         var watching = false;
@@ -1202,6 +1237,81 @@
         files.watchUploads = watchUploads;
 
         return files;
+    }
+
+    /* ---------------------------------------------------------------------
+     * Sound panel
+     *
+     * Switching the sound reconnects the session, so the widget button only
+     * opens this panel and the switch happens on a second, explicit click.
+     * ------------------------------------------------------------------- */
+
+    function createSoundPanel(widget, showSound) {
+
+        var sound = createPanel(widget, 'session-tools-sound');
+        var panel = sound.element;
+
+        panel.appendChild(element('div', 'title', 'Sound'));
+
+        var state = element('p', 'state');
+        panel.appendChild(state);
+
+        var actions = element('div', 'actions');
+        var toggle = addButton(actions, '', '', function () {
+            toggle.disabled = true;
+            setPanelStatus('Reconnecting…');
+            saveSettings({ audio: enabled ? 'off' : 'on' }).then(function () {
+                // Reconnect so the remote computer starts or stops the sound
+                window.location.reload();
+            }, function (error) {
+                setPanelStatus(error.message, 'error');
+                toggle.disabled = false;
+            });
+        });
+        addButton(actions, 'Cancel', 'Keep the sound as it is', function () {
+            sound.hide();
+        });
+        panel.appendChild(actions);
+
+        var status = element('p', 'status');
+        status.setAttribute('aria-live', 'polite');
+        panel.appendChild(status);
+
+        panel.appendChild(element('p', 'hint',
+            'Switching reconnects the session, which takes a few seconds. '
+            + 'Sound off saves bandwidth on slow connections.'));
+
+        function setPanelStatus(message, state) {
+            setStatus(status, message, state);
+            sound.position();
+        }
+
+        var enabled = true;
+
+        function render() {
+            state.textContent = enabled
+                ? 'Sound from the remote computer is on.'
+                : 'Sound from the remote computer is off.';
+            toggle.textContent = enabled ? 'Turn sound off' : 'Turn sound on';
+            toggle.title = toggle.textContent + ' (reconnects)';
+            showSound(enabled);
+            sound.position();
+        }
+
+        render();
+        loadSettings().then(function (saved) {
+            enabled = soundEnabled(saved);
+            render();
+        });
+
+        var show = sound.show;
+        sound.show = function () {
+            setStatus(status);
+            toggle.disabled = false;
+            show();
+        };
+
+        return sound;
     }
 
     /* ---------------------------------------------------------------------
@@ -1298,35 +1408,15 @@
         function showSound(enabled) {
             soundButton.innerHTML = enabled ? ICON_SOUND_ON : ICON_SOUND_OFF;
             soundButton.classList.toggle('off', !enabled);
-            soundButton.title = enabled
-                ? 'Sound on. Turn it off to save bandwidth (reconnects)'
-                : 'Sound off. Turn it on (reconnects)';
+            soundButton.title = enabled ? 'Sound on' : 'Sound off';
         }
-
-        var soundOn = true;
-        showSound(soundOn);
-        loadSettings().then(function (saved) {
-            soundOn = soundEnabled(saved);
-            showSound(soundOn);
-        });
-
-        function toggleSound() {
-            if (soundButton.disabled)
-                return;
-            soundButton.disabled = true;
-            saveSettings({ audio: soundOn ? 'off' : 'on' }).then(function () {
-                // Reconnect so the remote computer starts or stops the sound
-                window.location.reload();
-            }, function (error) {
-                soundButton.title = error.message;
-                soundButton.disabled = false;
-            });
-        }
+        showSound(true);
 
         var keys = createKeysPanel(widget);
         var clipboard = createClipboardPanel(widget);
         var files = createFilesPanel(widget);
-        var panels = [keys, clipboard, files];
+        var sound = createSoundPanel(widget, showSound);
+        var panels = [keys, clipboard, files, sound];
 
         function togglePanel(panel) {
             var open = panel.isOpen();
@@ -1387,7 +1477,7 @@
             else if (filesButton.contains(start.target))
                 togglePanel(files);
             else if (soundButton.contains(start.target))
-                toggleSound();
+                togglePanel(sound);
             else if (settingsButton.contains(start.target))
                 settings.open();
             start = null;

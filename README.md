@@ -37,11 +37,13 @@ A floating, draggable widget on every remote session:
   [Shared drive for RDP](#shared-drive-for-rdp-optional)). "Upload" sends
   files from this device into the folder shown; a click on a folder opens
   it, and a click on a file downloads it. Guacamole shows upload progress in
-  its own transfer dialog. Connections without a shared drive show a note
-  instead.
-- **Sound button**: turns the remote computer's sound on or off. Guacamole
-  streams sound uncompressed (about 1.4 Mbit/s while anything plays), so
-  turning it off helps on slow links. Switching reconnects the session. The
+  its own transfer dialog, and the panel says when an upload fails.
+  Connections without a shared drive show a note instead.
+- **Sound button**: opens a panel to turn the remote computer's sound on or
+  off. Guacamole streams sound uncompressed (about 1.4 Mbit/s while anything
+  plays), so turning it off helps on slow links. Switching reconnects the
+  session, so it takes a click in the panel, and the button turns red while
+  sound is off. The
   choice is stored per Guacamole user like the resolution (see
   [Per-user settings](#per-user-settings)); without that service sound stays
   on. Connections with `disable-audio` set have no sound either way.

@@ -321,6 +321,40 @@
 #session-tools-files .status.error   { color: #ef9a9a; }
 #session-tools-files .status.success { color: #a5d6a7; }
 
+/* Sound panel */
+
+#session-tools-sound {
+    width: 280px;
+}
+
+#session-tools-sound .title {
+    padding: 2px 2px 0;
+    font-size: 13px;
+}
+
+#session-tools-sound .actions {
+    display: flex;
+    gap: 6px;
+}
+
+#session-tools-sound .state,
+#session-tools-sound .status,
+#session-tools-sound .hint {
+    margin: 0;
+    font-weight: 400;
+    line-height: 1.3;
+}
+
+#session-tools-sound .hint {
+    opacity: 0.7;
+}
+
+#session-tools-sound .status:empty {
+    display: none;
+}
+
+#session-tools-sound .status.error { color: #ef9a9a; }
+
 /* Settings dialog */
 
 #session-tools-settings {
