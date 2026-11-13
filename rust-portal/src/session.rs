@@ -234,13 +234,37 @@ pub async fn run(
 ) {
     let id = conn.id;
     info!(user = %username, connection = id, "session start");
-    if let Err(e) = run_inner(&mut ws, conn, &config, &stop).await {
-        warn!(user = %username, connection = id, "session error: {e:#}");
-        send_json(&mut ws, json!({ "error": format!("{e:#}") })).await;
-    }
-    info!(user = %username, connection = id, "session end");
+    let reason = match run_inner(&mut ws, conn, &config, &stop).await {
+        Ok(reason) => reason.to_owned(),
+        Err(e) => {
+            // The browser reconnects by itself after a retryable error.
+            let retry = e.is::<Retryable>();
+            warn!(user = %username, connection = id, retry, "session error: {e:#}");
+            send_json(&mut ws, json!({ "error": format!("{e:#}"), "retry": retry })).await;
+            format!("{e:#}")
+        }
+    };
+    info!(user = %username, connection = id, %reason, "session end");
     let _ = ws.send(Message::Close(None)).await;
 }
+
+/// A session error the browser should answer by reconnecting (network trouble,
+/// not a decision by the user, an administrator or Windows).
+#[derive(Debug)]
+struct Retryable(&'static str);
+
+impl std::fmt::Display for Retryable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.0)
+    }
+}
+
+impl std::error::Error for Retryable {}
+
+/// How long the media path may stay down before the session ends. ICE
+/// "disconnected" is often brief (Wi-Fi hiccup, a phone pausing a background
+/// tab) and recovers on its own.
+const ICE_GRACE: Duration = Duration::from_secs(45);
 
 async fn bind_udp(config: &Config) -> anyhow::Result<UdpSocket> {
     let (lo, hi) = config.udp_ports;
@@ -251,6 +275,9 @@ async fn bind_udp(config: &Config) -> anyhow::Result<UdpSocket> {
     }
     bail!("no free UDP port in {lo}-{hi}")
 }
+
+/// How often the signaling WebSocket carries a message, so proxies keep it open.
+const WS_KEEPALIVE: Duration = Duration::from_secs(30);
 
 /// Desktop size limits, in pixels (width, height).
 const MIN_SIZE: (u16, u16) = (640, 480);
@@ -265,7 +292,7 @@ async fn run_inner(
     conn: Connection,
     config: &Config,
     stop: &tokio::sync::Notify,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<&'static str> {
     // 1. The browser sends its offer and screen size.
     let start: Start = loop {
         let msg = tokio::time::timeout(Duration::from_secs(15), ws.recv())
@@ -317,8 +344,14 @@ async fn run_inner(
     let mut audio_ts: u64 = 0;
     let mut audio_last: Option<Instant> = None;
     let mut clip_in = String::new();
+    // Since when the media path is down, if it is.
+    let mut ice_lost: Option<Instant> = None;
+    let mut keepalive = tokio::time::interval_at(
+        tokio::time::Instant::now() + WS_KEEPALIVE,
+        WS_KEEPALIVE,
+    );
     let mut buf = vec![0u8; 2000];
-    let result: anyhow::Result<()> = 'session: loop {
+    let result: anyhow::Result<&'static str> = 'session: loop {
         // Drain str0m until it wants to wait.
         let timeout = loop {
             match rtc.poll_output() {
@@ -327,8 +360,16 @@ async fn run_inner(
                     let _ = socket.send_to(&t.contents, t.destination).await;
                 }
                 Ok(Output::Event(event)) => match event {
-                    Event::IceConnectionStateChange(IceConnectionState::Disconnected) => {
-                        break 'session Ok(());
+                    Event::IceConnectionStateChange(state) => {
+                        debug!(?state, "ICE state");
+                        if state == IceConnectionState::Disconnected {
+                            ice_lost.get_or_insert_with(Instant::now);
+                        } else if state.is_connected() {
+                            if ice_lost.take().is_some() {
+                                info!("media connection recovered");
+                                shared.request_keyframe();
+                            }
+                        }
                     }
                     Event::Connected => {
                         connected = true;
@@ -389,7 +430,10 @@ async fn run_inner(
         };
 
         if !rtc.is_alive() {
-            break Ok(());
+            break Err(Retryable("media connection closed").into());
+        }
+        if ice_lost.is_some_and(|t| t.elapsed() > ICE_GRACE) {
+            break Err(Retryable("media connection lost").into());
         }
         if !connected && started.elapsed() > Duration::from_secs(20) {
             break Err(anyhow::anyhow!(
@@ -413,7 +457,7 @@ async fn run_inner(
             }
             _ = tokio::time::sleep_until(sleep_until) => Input::Timeout(Instant::now()),
             frame = frame_rx.recv() => {
-                let Some(frame) = frame else { break Ok(()) };
+                let Some(frame) = frame else { break Ok("encoder stopped") };
                 if let (true, Some((mid, params))) = (connected, &video) {
                     if let Some(writer) = rtc.writer(*mid) {
                         let ts = MediaTime::from_90khz(started.elapsed().as_micros() as u64 * 9 / 100);
@@ -449,8 +493,13 @@ async fn run_inner(
                 continue;
             }
             _ = stop.notified() => break Err(anyhow::anyhow!("An administrator ended this session.")),
+            _ = keepalive.tick() => {
+                // Proxies (Cloudflare: 100 s) drop idle WebSockets, which would end the session.
+                send_json(ws, json!({ "t": "ping" })).await;
+                continue;
+            }
             msg = ws.recv() => match msg {
-                Some(Ok(Message::Close(_))) | None | Some(Err(_)) => break Ok(()),
+                Some(Ok(Message::Close(_))) | None | Some(Err(_)) => break Ok("viewer closed the connection"),
                 _ => continue,
             },
             r = &mut rdp => {

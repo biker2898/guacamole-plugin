@@ -83,7 +83,7 @@ pub(crate) fn router(config: Config, pool: SqlitePool) -> Router {
         next_live_id: AtomicU64::new(1),
     });
     Router::new()
-        .route("/", get(|| async { Html(include_str!("../web/index.html")) }))
+        .route("/", get(index))
         .route("/app.js", get(app_js))
         .route("/api/login", post(login))
         .route("/api/logout", post(logout))
@@ -103,18 +103,36 @@ pub(crate) fn router(config: Config, pool: SqlitePool) -> Router {
         .with_state(app)
 }
 
+const APP_JS: &str = include_str!("../web/app.js");
+const ADMIN_JS: &str = include_str!("../web/admin.js");
+
+/// The page, with each script URL carrying a hash of its contents, so caches
+/// in between (Cloudflare keeps .js for hours) never serve an old script.
+static INDEX: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+    let version = |text: &str| {
+        use std::hash::{Hash as _, Hasher as _};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        text.hash(&mut h);
+        format!("{:x}", h.finish())
+    };
+    include_str!("../web/index.html")
+        .replace(r#"src="app.js""#, &format!(r#"src="app.js?v={}""#, version(APP_JS)))
+        .replace(r#"src="admin.js""#, &format!(r#"src="admin.js?v={}""#, version(ADMIN_JS)))
+});
+
+/// Browsers and proxies must check back before reusing these.
+const NO_CACHE: (header::HeaderName, &str) = (header::CACHE_CONTROL, "no-cache");
+
+async fn index() -> impl IntoResponse {
+    ([NO_CACHE], Html(INDEX.as_str()))
+}
+
 async fn app_js() -> impl IntoResponse {
-    (
-        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
-        include_str!("../web/app.js"),
-    )
+    ([(header::CONTENT_TYPE, "text/javascript; charset=utf-8"), NO_CACHE], APP_JS)
 }
 
 async fn admin_js() -> impl IntoResponse {
-    (
-        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
-        include_str!("../web/admin.js"),
-    )
+    ([(header::CONTENT_TYPE, "text/javascript; charset=utf-8"), NO_CACHE], ADMIN_JS)
 }
 
 /// nginx sets X-Real-IP; we only listen on localhost, so it can be trusted.

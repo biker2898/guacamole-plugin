@@ -103,9 +103,40 @@ const MODIFIERS = new Set([
 
 let current = null;
 
-function setStatus(text) {
-  $("status").textContent = text;
-  $("status").classList.toggle("hidden", !text);
+// Shows a message over the screen; with `retry`, a Reconnect button under it.
+function setStatus(text, retry) {
+  const el = $("status");
+  el.replaceChildren(text);
+  if (retry) {
+    const b = document.createElement("button");
+    b.textContent = "Reconnect";
+    b.className = "btn";
+    b.style.cssText = "display:block;margin:12px auto 0";
+    b.addEventListener("click", retry);
+    el.append(b);
+  }
+  el.classList.toggle("hidden", !text);
+}
+
+// Waits before each automatic reconnect after the connection drops.
+const RETRY_DELAYS = [1000, 2000, 5000, 10000, 20000, 30000];
+
+// The session dropped. Windows keeps the desktop, so reconnect by itself,
+// unless it never worked or Windows / an administrator ended it.
+function sessionLost(s) {
+  if (current !== s || s.lost) return;
+  s.lost = true;
+  const manual = () => { if (current === s) { closeSession(); openSession(s.conn); } };
+  const canRetry = (s.connected || s.attempt > 0) && (!s.error || s.retry);
+  if (!canRetry || s.attempt >= RETRY_DELAYS.length) {
+    return setStatus(s.error || "Disconnected.", manual);
+  }
+  setStatus("Connection lost. Reconnecting…", manual);
+  setTimeout(() => {
+    if (current !== s) return;
+    closeSession();
+    openSession(s.conn, s.attempt + 1);
+  }, RETRY_DELAYS[s.attempt]);
 }
 
 // ---------- screen size and full screen ----------
@@ -200,9 +231,9 @@ document.addEventListener("fullscreenchange", () => {
   }
 });
 
-async function openSession(conn) {
+async function openSession(conn, attempt = 0) {
   show("viewer");
-  setStatus("Connecting to " + conn.name + "…");
+  setStatus(attempt ? "Connection lost. Reconnecting…" : "Connecting to " + conn.name + "…");
   const video = $("screen");
   const { w: width, h: height } = wantedSize();
 
@@ -212,7 +243,7 @@ async function openSession(conn) {
   pc.addTransceiver("audio", { direction: "recvonly" });
   const ws = new WebSocket(`wss://${location.host}/api/session?id=${conn.id}`);
   const s = {
-    conn, connected: false, pc, dc, ws, remote: { w: width, h: height }, timers: [], cleanup: [],
+    conn, attempt, connected: false, lost: false, error: null, retry: false, pc, dc, ws, remote: { w: width, h: height }, timers: [], cleanup: [],
     keyChain: Promise.resolve(), clipIn: "", cursors: new Map(),
   };
   current = s;
@@ -231,7 +262,7 @@ async function openSession(conn) {
   };
   dc.onmessage = (ev) => onServerMessage(s, video, ev.data);
   pc.onconnectionstatechange = () => {
-    if (pc.connectionState === "failed") setStatus("Media connection failed.");
+    if (pc.connectionState === "failed") sessionLost(s);
   };
 
   ws.onopen = async () => {
@@ -247,16 +278,17 @@ async function openSession(conn) {
     } else if (msg.status === "connected") {
       setStatus("");
       s.connected = true;
+      s.attempt = 0;
       video.focus();
       // The window may have changed while connecting.
       if (getRes() === "fit") resizeRemote(s);
     } else if (msg.error) {
+      s.error = msg.error;
+      s.retry = !!msg.retry;
       setStatus(msg.error);
     }
   };
-  ws.onclose = () => {
-    if (current === s && !$("status").textContent) setStatus("Disconnected.");
-  };
+  ws.onclose = () => sessionLost(s);
 
   attachInput(s, video);
   s.timers.push(setInterval(() => updateStats(s), 1000));
