@@ -1,0 +1,27 @@
+[Unit]
+Description=Rust Portal (RDP over WebRTC)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=rust-portal
+Group=rust-portal
+EnvironmentFile=/etc/default/rust-portal
+ExecStart=/usr/local/bin/rust-portal serve
+Restart=on-failure
+RestartSec=2
+StateDirectory=rust-portal
+StateDirectoryMode=0700
+WorkingDirectory=/var/lib/rust-portal
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

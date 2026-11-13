@@ -39,14 +39,6 @@ A floating, draggable widget on every remote session:
   it, and a click on a file downloads it. Guacamole shows upload progress in
   its own transfer dialog, and the panel says when an upload fails.
   Connections without a shared drive show a note instead.
-- **Sound button**: opens a panel to turn the remote computer's sound on or
-  off. Guacamole streams sound uncompressed (about 1.4 Mbit/s while anything
-  plays), so turning it off helps on slow links. Switching reconnects the
-  session, so it takes a click in the panel, and the button turns red while
-  sound is off. The
-  choice is stored per Guacamole user like the resolution (see
-  [Per-user settings](#per-user-settings)); without that service sound stays
-  on. Connections with `disable-audio` set have no sound either way.
 - **Settings button**: opens a dialog with two settings:
   - *Screen resolution*: "Fit browser window" (Guacamole's default) or a
     fixed 16:9 or 16:10 size such as 1920 × 1080 or 1280 × 800. Applying it
@@ -105,7 +97,7 @@ page with Ctrl+F5.
 ## Per-user settings
 
 Guacamole keeps no settings of its own for a non-admin user, so the chosen
-resolution and sound setting are stored by a small service in `prefs/`
+resolution is stored by a small service in `prefs/`
 (`session-tools-prefs.py`, Python standard library only). Each request
 carries the user's Guacamole token; the service asks Guacamole whose token it
 is and reads or writes only that user's settings, in

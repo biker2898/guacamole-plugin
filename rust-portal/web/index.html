@@ -1,0 +1,199 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Rust Portal</title>
+<style>
+  :root { --bg: #111418; --panel: #1b2027; --line: #2c333d; --text: #e6e9ee; --muted: #8b95a3; --accent: #4f8cff; --bad: #ff6b6b; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); font: 15px/1.4 system-ui, sans-serif; }
+  .hidden { display: none !important; }
+  .center { min-height: 100%; display: flex; align-items: center; justify-content: center; padding: 16px; }
+  .card { width: 100%; max-width: 380px; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 24px; }
+  h1 { font-size: 18px; margin: 0 0 16px; }
+  label { display: block; color: var(--muted); font-size: 13px; margin: 12px 0 4px; }
+  input { width: 100%; padding: 10px; border-radius: 6px; border: 1px solid var(--line); background: var(--bg); color: var(--text); font-size: 15px; }
+  button { margin-top: 16px; width: 100%; padding: 10px; border: 0; border-radius: 6px; background: var(--accent); color: #fff; font-size: 15px; cursor: pointer; }
+  button.link { background: none; color: var(--muted); width: auto; padding: 0; margin: 0; font-size: 13px; }
+  .error { color: var(--bad); font-size: 13px; min-height: 18px; margin-top: 10px; }
+  .list { list-style: none; padding: 0; margin: 0; }
+  .list li { padding: 12px; border: 1px solid var(--line); border-radius: 6px; margin-bottom: 8px; cursor: pointer; }
+  .list li:hover { border-color: var(--accent); }
+  .row { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
+  #viewer { position: fixed; inset: 0; background: #000; }
+  #screen { width: 100%; height: 100%; object-fit: contain; outline: none; cursor: default; touch-action: none; }
+  #hud { position: fixed; top: 6px; right: 8px; background: rgba(0,0,0,.6); color: #cfd6df; font: 12px ui-monospace, monospace; padding: 4px 8px; border-radius: 4px; pointer-events: auto; }
+  #hud button { width: auto; margin: 0 0 0 8px; padding: 2px 8px; font-size: 12px; background: #333; }
+  #hud select { width: auto; margin: 0 0 0 8px; padding: 1px 4px; font-size: 12px; background: #333; color: #cfd6df; border: 0; border-radius: 3px; }
+  #viewer:fullscreen #hud { opacity: 0; transition: opacity .2s; }
+  #viewer:fullscreen #hud:hover, #viewer:fullscreen #hud:focus-within { opacity: 1; }
+  .res-pick { display: flex; align-items: center; justify-content: flex-end; gap: 8px; margin-top: 12px; color: var(--muted); font-size: 13px; }
+  .res-pick select { width: auto; margin: 0; }
+  .note { color: var(--muted); font-size: 13px; margin: 8px 0; }
+  .note code { color: var(--text); font-size: 13px; word-break: break-all; }
+  .note a { color: var(--accent); }
+  .qr { background: #fff; border-radius: 6px; padding: 8px; width: 216px; margin: 8px auto; }
+  .qr svg { display: block; width: 200px; height: 200px; }
+  /* admin */
+  #admin { padding: 16px; max-width: 1100px; margin: 0 auto; }
+  #admin h1 { margin: 0; }
+  .tabs { display: flex; gap: 4px; margin: 16px 0 12px; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+  .tabs button { width: auto; margin: 0; background: none; color: var(--muted); border-radius: 6px 6px 0 0; padding: 8px 14px; }
+  .tabs button.active { color: var(--text); background: var(--panel); border: 1px solid var(--line); border-bottom-color: var(--panel); margin-bottom: -1px; }
+  .toolbar { display: flex; gap: 8px; align-items: center; margin-bottom: 10px; flex-wrap: wrap; }
+  .toolbar input { max-width: 260px; }
+  .btn { width: auto; margin: 0; padding: 7px 12px; font-size: 14px; }
+  .btn.secondary { background: #333b47; }
+  .btn.danger { background: #a83a3a; }
+  .scroll { overflow-x: auto; border: 1px solid var(--line); border-radius: 8px; }
+  table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+  th { color: var(--muted); font-weight: 500; background: var(--panel); }
+  tr:last-child td { border-bottom: 0; }
+  td.actions { text-align: right; }
+  .tag { display: inline-block; font-size: 12px; padding: 1px 7px; border-radius: 10px; background: #2c333d; color: var(--muted); }
+  .tag.on { background: #1f3a5f; color: #9cc2ff; }
+  .tag.warn { background: #4a3a1a; color: #f0c674; }
+  .tag.bad { background: #4a1f1f; color: #ff9b9b; }
+  dialog { background: var(--panel); color: var(--text); border: 1px solid var(--line); border-radius: 10px; padding: 20px; width: min(520px, calc(100vw - 32px)); }
+  dialog::backdrop { background: rgba(0,0,0,.6); }
+  dialog h2 { font-size: 17px; margin: 0 0 8px; }
+  .check { display: flex; align-items: center; gap: 8px; color: var(--text); font-size: 14px; margin: 10px 0 0; }
+  .check input { width: auto; }
+  .checklist { max-height: 220px; overflow: auto; border: 1px solid var(--line); border-radius: 6px; padding: 4px 10px 10px; }
+  .dialog-buttons { display: flex; gap: 8px; justify-content: flex-end; margin-top: 18px; flex-wrap: wrap; }
+  .dialog-buttons .left { margin-right: auto; }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 0 12px; }
+  #status { position: fixed; left: 50%; top: 45%; transform: translate(-50%, -50%); color: var(--muted); text-align: center; padding: 16px; }
+</style>
+</head>
+<body>
+<div id="login" class="center hidden">
+  <form class="card" id="login-form">
+    <h1>Rust Portal</h1>
+    <div id="cred-fields">
+      <label for="username">Username</label>
+      <input id="username" autocomplete="username" required>
+      <label for="password">Password</label>
+      <input id="password" type="password" autocomplete="current-password" required>
+    </div>
+    <div id="otp-setup" class="hidden">
+      <p class="note">Set up two-factor authentication: scan this code with an authenticator app
+        (Google Authenticator, Microsoft Authenticator, …), then enter the 6-digit code it shows.</p>
+      <div id="otp-qr" class="qr"></div>
+      <p class="note">Or enter this key by hand: <code id="otp-secret"></code>
+        · <a id="otp-link" href="#">open in app</a></p>
+    </div>
+    <div id="otp-field" class="hidden">
+      <label for="otp">Authentication code</label>
+      <input id="otp" inputmode="numeric" autocomplete="one-time-code" maxlength="6">
+    </div>
+    <button type="submit">Sign in</button>
+    <div class="error" id="login-error"></div>
+  </form>
+</div>
+
+<div id="home" class="center hidden">
+  <div class="card">
+    <div class="row"><h1 id="hello" style="margin:0"></h1>
+      <span><button class="link hidden" id="manage">Manage</button> <button class="link" id="logout">Sign out</button></span></div>
+    <ul class="list" id="connections"></ul>
+    <div class="error" id="home-error"></div>
+    <label class="res-pick">Screen size <select id="res"></select></label>
+  </div>
+</div>
+
+<div id="viewer" class="hidden">
+  <video id="screen" autoplay playsinline muted tabindex="0"></video>
+  <audio id="sound" autoplay></audio>
+  <div id="status"></div>
+  <dialog id="paste-dialog">
+    <form method="dialog" id="paste-form">
+      <h2>Paste into the computer</h2>
+      <p class="note">This browser does not let the page read your clipboard. Paste here (long-press, then Paste), or type, then send.</p>
+      <textarea id="paste-text" rows="6" style="width:100%;box-sizing:border-box"></textarea>
+      <div class="dialog-buttons">
+        <button type="button" class="btn secondary" id="paste-cancel">Cancel</button>
+        <button type="submit" class="btn">Send and paste</button>
+      </div>
+    </form>
+  </dialog>
+  <div id="hud"><span id="stats">…</span><select id="hud-res" title="Screen size"></select><button id="paste" title="Send your clipboard text to the computer and paste it">Paste</button><button id="fullscreen">Full screen</button><button id="leave">Leave</button></div>
+</div>
+
+<div id="admin" class="hidden">
+  <div class="row"><h1>Manage</h1><button class="link" id="admin-back">← Back to computers</button></div>
+  <div class="tabs" id="admin-tabs">
+    <button data-tab="users" class="active">Users</button>
+    <button data-tab="computers">Computers</button>
+    <button data-tab="sessions">Active sessions</button>
+  </div>
+  <div id="tab-users">
+    <div class="toolbar"><button class="btn" id="add-user">Add user</button>
+      <input id="user-filter" placeholder="Filter users"></div>
+    <div class="scroll"><table><thead><tr><th>User</th><th>Role</th><th>Two-factor</th><th>Status</th><th>Computers</th><th></th></tr></thead>
+      <tbody id="users-body"></tbody></table></div>
+  </div>
+  <div id="tab-computers" class="hidden">
+    <div class="toolbar"><button class="btn" id="add-computer">Add computer</button></div>
+    <div class="scroll"><table><thead><tr><th>Name</th><th>Address</th><th>RDP user</th><th>Users</th><th></th></tr></thead>
+      <tbody id="computers-body"></tbody></table></div>
+  </div>
+  <div id="tab-sessions" class="hidden">
+    <p class="note">Sessions on this portal only (not Guacamole). Refreshes every 5 seconds.</p>
+    <div class="scroll"><table><thead><tr><th>User</th><th>Computer</th><th>Since</th><th></th></tr></thead>
+      <tbody id="sessions-body"></tbody></table></div>
+  </div>
+  <div class="error" id="admin-error"></div>
+</div>
+
+<dialog id="user-dialog">
+  <form method="dialog" id="user-form">
+    <h2 id="user-dialog-title"></h2>
+    <label for="u-name">Username</label>
+    <input id="u-name" autocomplete="off" required>
+    <label for="u-pass" id="u-pass-label">Password</label>
+    <input id="u-pass" type="password" autocomplete="new-password">
+    <label class="check"><input type="checkbox" id="u-admin"> Administrator (sees and manages every computer)</label>
+    <label class="check"><input type="checkbox" id="u-totp-off"> No two-factor authentication</label>
+    <label class="check" id="u-disabled-row"><input type="checkbox" id="u-disabled"> Account disabled</label>
+    <p class="note" id="u-totp-state"></p>
+    <label>Computers</label>
+    <div class="checklist" id="u-computers"></div>
+    <div class="error" id="user-error"></div>
+    <div class="dialog-buttons">
+      <button type="button" class="btn danger left" id="u-delete">Delete</button>
+      <button type="button" class="btn secondary" id="u-reset-totp">Reset two-factor</button>
+      <button type="button" class="btn secondary" id="u-cancel">Cancel</button>
+      <button type="submit" class="btn" id="u-save">Save</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="computer-dialog">
+  <form method="dialog" id="computer-form">
+    <h2 id="computer-dialog-title"></h2>
+    <label for="c-name">Name</label>
+    <input id="c-name" autocomplete="off" required>
+    <div class="grid2">
+      <div><label for="c-host">Hostname or IP</label><input id="c-host" autocomplete="off" required></div>
+      <div><label for="c-port">Port</label><input id="c-port" type="number" min="1" max="65535" value="3389" required></div>
+      <div><label for="c-user">RDP username</label><input id="c-user" autocomplete="off"></div>
+      <div><label for="c-domain">Domain</label><input id="c-domain" autocomplete="off"></div>
+    </div>
+    <label for="c-pass">RDP password</label>
+    <input id="c-pass" type="password" autocomplete="new-password">
+    <div class="error" id="computer-error"></div>
+    <div class="dialog-buttons">
+      <button type="button" class="btn danger left" id="c-delete">Delete</button>
+      <button type="button" class="btn secondary" id="c-cancel">Cancel</button>
+      <button type="submit" class="btn">Save</button>
+    </div>
+  </form>
+</dialog>
+
+<script src="app.js"></script>
+<script src="admin.js"></script>
+</body>
+</html>

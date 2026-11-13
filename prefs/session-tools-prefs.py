@@ -7,7 +7,7 @@ settings for it on the server, so the extension stores them here. Every
 request carries the user's Guacamole token; this server asks Guacamole whose
 token it is and reads or writes only that user's settings.
 
-  GET /prefs?dataSource=postgresql    returns {"resolution": "1920x1080", "audio": "off"}
+  GET /prefs?dataSource=postgresql    returns {"resolution": "1920x1080"}
   PUT /prefs?dataSource=postgresql    body {"resolution": "auto"}, merged in
 
 Environment:
@@ -40,7 +40,6 @@ DATA_SOURCE = re.compile(r'^[A-Za-z0-9_-]{1,64}$')
 # Settings a user may store, with the values each accepts
 SETTINGS = {
     'resolution': re.compile(r'^(auto|\d{3,5}x\d{3,5})$'),
-    'audio': re.compile(r'^(on|off)$'),
 }
 
 
