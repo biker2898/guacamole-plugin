@@ -515,8 +515,14 @@ pub async fn probe(pool: &SqlitePool, id: i64) -> anyhow::Result<()> {
                 match e {
                     RdpEvent::Cursor(p) => {
                         cursors += 1;
-                        debug!(w = p.width, h = p.height, "cursor");
+                        let opaque = p.bitmap_data.chunks_exact(4).filter(|px| px[3] != 0).count();
+                        println!(
+                            "cursor at {} ms: {}x{} hotspot {},{} opaque_pixels={opaque}",
+                            begin.elapsed().as_millis(), p.width, p.height, p.hotspot_x, p.hotspot_y
+                        );
                     }
+                    RdpEvent::CursorDefault => println!("cursor at {} ms: default", begin.elapsed().as_millis()),
+                    RdpEvent::CursorHidden => println!("cursor at {} ms: hidden", begin.elapsed().as_millis()),
                     RdpEvent::Size { width, height } => resized = Some(format!("{width}x{height}")),
                     RdpEvent::ResizeUnsupported => resized = Some("unsupported".to_owned()),
                     _ => {}

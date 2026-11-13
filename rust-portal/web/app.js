@@ -147,10 +147,9 @@ const RES_OPTIONS = [
   ["1366x768", "1366 × 768"],
   ["1600x900", "1600 × 900"],
   ["1920x1080", "1920 × 1080"],
-  ["2560x1440", "2560 × 1440"],
 ];
 // Same limits as the server.
-const MIN_W = 640, MIN_H = 480, MAX_W = 2560, MAX_H = 1600;
+const MIN_W = 640, MIN_H = 480, MAX_W = 1920, MAX_H = 1080;
 // Computers that cannot change size live; for them a size change reconnects.
 const noLiveResize = new Set();
 
@@ -173,6 +172,10 @@ function wantedSize() {
     const dpr = Math.min(window.devicePixelRatio || 1, 1.5);
     w = Math.round(window.innerWidth * dpr);
     h = Math.round(window.innerHeight * dpr);
+    // Larger windows: scale down to fit 1920 x 1080, keeping the shape.
+    const k = Math.min(1, MAX_W / w, MAX_H / h);
+    w = Math.round(w * k);
+    h = Math.round(h * k);
   } else {
     [w, h] = v.split("x").map(Number);
   }
@@ -532,47 +535,102 @@ function onServerMessage(s, video, data) {
   }
 }
 
-// Turns a Windows cursor (RGBA, straight alpha) into a CSS cursor value.
+// Turns a Windows cursor (RGBA, straight alpha) into a CSS cursor value. The
+// server sends each image once with its id, then only the id; images are
+// kept for the whole session.
 function cursorCss(s, msg) {
   if (msg.kind === "none") return "none";
-  if (!msg.rgba) return "default";
-  const key = `${msg.w}x${msg.h}@${msg.x},${msg.y}:${msg.rgba}`;
-  let css = s.cursors.get(key);
-  if (!css) {
-    const bytes = Uint8ClampedArray.from(atob(msg.rgba), (ch) => ch.charCodeAt(0));
-    if (bytes.length !== msg.w * msg.h * 4) return "default";
-    const canvas = document.createElement("canvas");
-    canvas.width = msg.w;
-    canvas.height = msg.h;
-    canvas.getContext("2d").putImageData(new ImageData(bytes, msg.w, msg.h), 0, 0);
-    css = `url(${canvas.toDataURL()}) ${msg.x} ${msg.y}, default`;
-    if (s.cursors.size > 64) s.cursors.clear();
-    s.cursors.set(key, css);
-  }
+  if (msg.kind === "default" || !msg.id) return "default";
+  let css = s.cursors.get(msg.id);
+  if (css) return css;
+  if (!msg.rgba) return "default"; // image never arrived (should not happen)
+  const bytes = Uint8ClampedArray.from(atob(msg.rgba), (ch) => ch.charCodeAt(0));
+  if (bytes.length !== msg.w * msg.h * 4) return "default";
+  const canvas = document.createElement("canvas");
+  canvas.width = msg.w;
+  canvas.height = msg.h;
+  canvas.getContext("2d").putImageData(new ImageData(bytes, msg.w, msg.h), 0, 0);
+  css = `url(${canvas.toDataURL()}) ${msg.x} ${msg.y}, default`;
+  s.cursors.set(msg.id, css);
   return css;
 }
 
 let lastStats = null;
 async function updateStats(s) {
   const stats = await s.pc.getStats();
-  let rtt = null, fps = null, bytes = 0, jitterMs = null;
+  let rtt = null, frames = 0, bytes = 0, jitterMs = null;
   stats.forEach((r) => {
     if (r.type === "candidate-pair" && r.nominated && r.currentRoundTripTime !== undefined) rtt = r.currentRoundTripTime;
     if (r.type === "inbound-rtp" && r.kind === "video") {
-      fps = r.framesPerSecond;
+      frames = r.framesDecoded || 0;
       bytes = r.bytesReceived;
       if (r.jitterBufferEmittedCount) jitterMs = (r.jitterBufferDelay / r.jitterBufferEmittedCount) * 1000;
     }
   });
   const now = performance.now();
-  let kbps = 0;
-  if (lastStats) kbps = ((bytes - lastStats.bytes) * 8) / (now - lastStats.t);
-  lastStats = { bytes, t: now };
+  // Rates from counter deltas: the browser's own framesPerSecond reads 0 in
+  // some browsers while frames are still arriving (seen while scrolling).
+  let kbps = 0, fps = 0;
+  if (lastStats && lastStats.pc === s.pc) {
+    const secs = (now - lastStats.t) / 1000;
+    kbps = ((bytes - lastStats.bytes) * 8) / (secs * 1000);
+    fps = Math.round(Math.max(0, frames - lastStats.frames) / secs);
+  }
+  lastStats = { pc: s.pc, bytes, frames, t: now };
   $("stats").textContent =
     `rtt ${rtt === null ? "–" : Math.round(rtt * 1000) + "ms"} · ` +
     `buf ${jitterMs === null ? "–" : Math.round(jitterMs) + "ms"} · ` +
-    `${fps || 0} fps · ${Math.max(0, Math.round(kbps))} kbps`;
+    `${fps} fps · ${Math.max(0, Math.round(kbps))} kbps`;
 }
+
+// ---------- session bar: always shown, drag by the grip ----------
+
+(() => {
+  const hud = $("hud"), grip = $("hud-grip");
+  const load = () => {
+    try { return JSON.parse(localStorage.getItem("hud-pos")); } catch { return null; }
+  };
+  // Keep the bar fully on screen; position is stored as fractions of the
+  // window so it lands in the same place after a resize or full screen.
+  const place = (pos) => {
+    if (!pos) { hud.style.left = hud.style.top = ""; hud.style.right = "8px"; return; }
+    const w = hud.offsetWidth, h = hud.offsetHeight;
+    const x = Math.min(Math.max(0, pos.x * innerWidth), Math.max(0, innerWidth - w));
+    const y = Math.min(Math.max(0, pos.y * innerHeight), Math.max(0, innerHeight - h));
+    hud.style.right = "auto";
+    hud.style.left = x + "px";
+    hud.style.top = y + "px";
+  };
+  let drag = null;
+  grip.addEventListener("pointerdown", (e) => {
+    e.preventDefault();
+    const r = hud.getBoundingClientRect();
+    drag = { dx: e.clientX - r.left, dy: e.clientY - r.top };
+    grip.setPointerCapture(e.pointerId);
+    hud.classList.add("dragging");
+  });
+  grip.addEventListener("pointermove", (e) => {
+    if (!drag) return;
+    place({ x: (e.clientX - drag.dx) / innerWidth, y: (e.clientY - drag.dy) / innerHeight });
+  });
+  const end = () => {
+    if (!drag) return;
+    drag = null;
+    hud.classList.remove("dragging");
+    const r = hud.getBoundingClientRect();
+    try { localStorage.setItem("hud-pos", JSON.stringify({ x: r.left / innerWidth, y: r.top / innerHeight })); } catch {}
+  };
+  grip.addEventListener("pointerup", end);
+  grip.addEventListener("pointercancel", end);
+  // Double-click the grip to put the bar back in the corner.
+  grip.addEventListener("dblclick", () => {
+    try { localStorage.removeItem("hud-pos"); } catch {}
+    place(null);
+  });
+  addEventListener("resize", () => place(load()));
+  document.addEventListener("fullscreenchange", () => place(load()));
+  new ResizeObserver(() => place(load())).observe(hud);
+})();
 
 // ---------- start ----------
 

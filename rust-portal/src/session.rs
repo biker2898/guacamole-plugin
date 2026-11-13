@@ -179,46 +179,127 @@ fn to_input(msg: ClientInput) -> InputMsg {
 /// the SCTP message size limit, even for 4-byte UTF-8).
 const CLIP_CHUNK: usize = 16 * 1024;
 
-/// Sends a JSON message to the browser on the data channel.
-fn send_dc(rtc: &mut Rtc, chan: Option<ChannelId>, value: &serde_json::Value) {
-    if let Some(mut ch) = chan.and_then(|id| rtc.channel(id)) {
-        if let Err(e) = ch.write(false, value.to_string().as_bytes()) {
-            debug!("data channel write failed: {e}");
+/// A message larger than str0m's whole SCTP send buffer (128 KB) can never be
+/// sent; such messages are dropped (none of ours come close).
+const DC_MAX_MESSAGE: usize = 120 * 1024;
+
+/// What the browser should show as the mouse pointer.
+enum CursorState {
+    Shape(Arc<ironrdp_graphics::pointer::DecodedPointer>),
+    Default,
+    Hidden,
+}
+
+/// Messages for the browser on the "input" data channel.
+///
+/// str0m refuses a write that does not fit its SCTP send buffer, which only
+/// frees up as the browser acknowledges data. At logon Windows sends a burst
+/// of pointer shapes, so writing directly lost some, and the pointer could
+/// stay hidden. Messages now wait here and go out in order as room frees up
+/// (and wait for the channel to open). Only the newest pointer matters, so it
+/// has its own slot that a newer one replaces. Each pointer image is sent once;
+/// later uses refer to it by id.
+#[derive(Default)]
+struct DcOut {
+    chan: Option<ChannelId>,
+    cursor: Option<CursorState>,
+    queue: std::collections::VecDeque<Vec<u8>>,
+    /// Pointer images the browser has (ids it has been sent in full).
+    sent_cursors: std::collections::HashSet<u64>,
+}
+
+impl DcOut {
+    fn push(&mut self, value: &serde_json::Value) {
+        let bytes = value.to_string().into_bytes();
+        if bytes.len() > DC_MAX_MESSAGE {
+            warn!(len = bytes.len(), "data channel message too large, dropped");
+            return;
+        }
+        self.queue.push_back(bytes);
+    }
+
+    /// Writes what fits now; call again later for the rest.
+    fn flush(&mut self, rtc: &mut Rtc) {
+        let Some(mut ch) = self.chan.and_then(|id| rtc.channel(id)) else {
+            return;
+        };
+        if let Some(cursor) = self.cursor.take() {
+            let (msg, full_id) = cursor_message(&cursor, &self.sent_cursors);
+            match ch.write(false, msg.as_bytes()) {
+                Ok(true) => {
+                    if let Some(id) = full_id {
+                        if self.sent_cursors.len() >= 512 {
+                            self.sent_cursors.clear();
+                        }
+                        self.sent_cursors.insert(id);
+                    }
+                }
+                Ok(false) => {
+                    self.cursor = Some(cursor);
+                    return;
+                }
+                Err(e) => debug!("data channel write failed: {e}"),
+            }
+        }
+        while let Some(front) = self.queue.front() {
+            match ch.write(false, front) {
+                Ok(true) => {}
+                Ok(false) => return,
+                Err(e) => debug!("data channel write failed: {e}"),
+            }
+            self.queue.pop_front();
         }
     }
 }
 
-fn send_event(rtc: &mut Rtc, chan: Option<ChannelId>, event: RdpEvent) {
+/// The pointer message, and the image id if this one carries the image.
+fn cursor_message(cursor: &CursorState, sent: &std::collections::HashSet<u64>) -> (String, Option<u64>) {
     use base64::Engine as _;
+    use std::hash::{Hash as _, Hasher as _};
+    let p = match cursor {
+        CursorState::Default => return (json!({ "t": "cursor", "kind": "default" }).to_string(), None),
+        CursorState::Hidden => return (json!({ "t": "cursor", "kind": "none" }).to_string(), None),
+        CursorState::Shape(p) => p,
+    };
+    // Browsers ignore CSS cursors larger than 128 px.
+    if p.width == 0 || p.height == 0 || p.width > 128 || p.height > 128 {
+        return (json!({ "t": "cursor", "kind": "default" }).to_string(), None);
+    }
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    (p.width, p.height, p.hotspot_x, p.hotspot_y, &p.bitmap_data).hash(&mut h);
+    let id = h.finish();
+    let id_text = format!("{id:x}");
+    if sent.contains(&id) {
+        return (json!({ "t": "cursor", "id": id_text }).to_string(), None);
+    }
+    let rgba = base64::engine::general_purpose::STANDARD.encode(&p.bitmap_data);
+    let msg = json!({
+        "t": "cursor", "id": id_text, "w": p.width, "h": p.height,
+        "x": p.hotspot_x, "y": p.hotspot_y, "rgba": rgba,
+    });
+    (msg.to_string(), Some(id))
+}
+
+fn send_event(rtc: &mut Rtc, out: &mut DcOut, event: RdpEvent) {
     match event {
-        RdpEvent::Cursor(p) => {
-            // Browsers ignore CSS cursors larger than 128 px.
-            if p.width == 0 || p.height == 0 || p.width > 128 || p.height > 128 {
-                return send_dc(rtc, chan, &json!({ "t": "cursor", "kind": "default" }));
-            }
-            let rgba = base64::engine::general_purpose::STANDARD.encode(&p.bitmap_data);
-            send_dc(
-                rtc,
-                chan,
-                &json!({ "t": "cursor", "w": p.width, "h": p.height, "x": p.hotspot_x, "y": p.hotspot_y, "rgba": rgba }),
-            );
-        }
-        RdpEvent::CursorDefault => send_dc(rtc, chan, &json!({ "t": "cursor", "kind": "default" })),
-        RdpEvent::CursorHidden => send_dc(rtc, chan, &json!({ "t": "cursor", "kind": "none" })),
+        RdpEvent::Cursor(p) => out.cursor = Some(CursorState::Shape(p)),
+        RdpEvent::CursorDefault => out.cursor = Some(CursorState::Default),
+        RdpEvent::CursorHidden => out.cursor = Some(CursorState::Hidden),
         RdpEvent::Clipboard(text) => {
             let chars: Vec<char> = text.chars().collect();
             let parts: Vec<String> = chars.chunks(CLIP_CHUNK).map(|c| c.iter().collect()).collect();
             if parts.is_empty() {
-                return send_dc(rtc, chan, &json!({ "t": "clip", "d": "", "more": false }));
+                out.push(&json!({ "t": "clip", "d": "", "more": false }));
             }
-            let last = parts.len() - 1;
+            let last = parts.len().saturating_sub(1);
             for (i, part) in parts.into_iter().enumerate() {
-                send_dc(rtc, chan, &json!({ "t": "clip", "d": part, "more": i < last }));
+                out.push(&json!({ "t": "clip", "d": part, "more": i < last }));
             }
         }
-        RdpEvent::Size { width, height } => send_dc(rtc, chan, &json!({ "t": "size", "w": width, "h": height })),
-        RdpEvent::ResizeUnsupported => send_dc(rtc, chan, &json!({ "t": "size_unsupported" })),
+        RdpEvent::Size { width, height } => out.push(&json!({ "t": "size", "w": width, "h": height })),
+        RdpEvent::ResizeUnsupported => out.push(&json!({ "t": "size_unsupported" })),
     }
+    out.flush(rtc);
 }
 
 async fn send_json(ws: &mut WebSocket, value: serde_json::Value) {
@@ -251,11 +332,11 @@ pub async fn run(
 /// A session error the browser should answer by reconnecting (network trouble,
 /// not a decision by the user, an administrator or Windows).
 #[derive(Debug)]
-struct Retryable(&'static str);
+struct Retryable(String);
 
 impl std::fmt::Display for Retryable {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.0)
+        f.write_str(&self.0)
     }
 }
 
@@ -281,7 +362,7 @@ const WS_KEEPALIVE: Duration = Duration::from_secs(30);
 
 /// Desktop size limits, in pixels (width, height).
 const MIN_SIZE: (u16, u16) = (640, 480);
-const MAX_SIZE: (u16, u16) = (2560, 1600);
+const MAX_SIZE: (u16, u16) = (1920, 1080);
 
 fn even_clamp(v: u16, lo: u16, hi: u16) -> u16 {
     v.clamp(lo, hi) & !1
@@ -339,7 +420,7 @@ async fn run_inner(
     let mut connected = false;
     let mut video: Option<(Mid, str0m::format::PayloadParams)> = None;
     let mut audio: Option<(Mid, str0m::format::PayloadParams)> = None;
-    let mut chan: Option<ChannelId> = None;
+    let mut dc = DcOut::default();
     // RTP time of the next sound packet (48 kHz), and when the last one went out.
     let mut audio_ts: u64 = 0;
     let mut audio_last: Option<Instant> = None;
@@ -352,6 +433,8 @@ async fn run_inner(
     );
     let mut buf = vec![0u8; 2000];
     let result: anyhow::Result<&'static str> = 'session: loop {
+        // Send what waited for room in the SCTP buffer (freed by acks just handled).
+        dc.flush(&mut rtc);
         // Drain str0m until it wants to wait.
         let timeout = loop {
             match rtc.poll_output() {
@@ -400,7 +483,8 @@ async fn run_inner(
                     }
                     Event::ChannelOpen(id, label) => {
                         debug!(%label, "data channel open");
-                        chan = Some(id);
+                        dc.chan = Some(id);
+                        dc.flush(&mut rtc);
                     }
                     Event::KeyframeRequest(_) => shared.request_keyframe(),
                     Event::EgressBitrateEstimate(BweKind::Twcc { estimate, .. }) => {
@@ -430,17 +514,19 @@ async fn run_inner(
         };
 
         if !rtc.is_alive() {
-            break Err(Retryable("media connection closed").into());
+            break Err(Retryable("media connection closed".into()).into());
         }
         if ice_lost.is_some_and(|t| t.elapsed() > ICE_GRACE) {
-            break Err(Retryable("media connection lost").into());
+            break Err(Retryable("media connection lost".into()).into());
         }
         if !connected && started.elapsed() > Duration::from_secs(20) {
-            break Err(anyhow::anyhow!(
+            // Retryable: the browser retries only when this was a reconnect
+            // (it worked before), so a first-time failure still shows the message.
+            break Err(Retryable(format!(
                 "media connection failed: UDP {}-{} may be blocked",
-                config.udp_ports.0,
-                config.udp_ports.1
-            ));
+                config.udp_ports.0, config.udp_ports.1
+            ))
+            .into());
         }
 
         let sleep_until = tokio::time::Instant::from_std(timeout.min(Instant::now() + Duration::from_secs(1)));
@@ -470,7 +556,7 @@ async fn run_inner(
                 continue;
             }
             Some(event) = events_rx.recv() => {
-                send_event(&mut rtc, chan, event);
+                send_event(&mut rtc, &mut dc, event);
                 continue;
             }
             Some(packet) = audio_rx.recv() => {
@@ -531,5 +617,28 @@ struct StopOnDrop(Arc<Shared>);
 impl Drop for StopOnDrop {
     fn drop(&mut self) {
         self.0.stop();
+    }
+}
+
+#[cfg(test)]
+mod dc_tests {
+    use super::*;
+    use ironrdp_graphics::pointer::DecodedPointer;
+
+    #[test]
+    fn cursor_image_sent_once() {
+        let p = Arc::new(DecodedPointer {
+            width: 2,
+            height: 2,
+            hotspot_x: 1,
+            hotspot_y: 0,
+            bitmap_data: vec![255; 16],
+        });
+        let mut sent = std::collections::HashSet::new();
+        let (first, id) = cursor_message(&CursorState::Shape(p.clone()), &sent);
+        assert!(first.contains("rgba"));
+        sent.insert(id.expect("first use carries the image"));
+        let (again, id) = cursor_message(&CursorState::Shape(p), &sent);
+        assert!(!again.contains("rgba") && again.contains("\"id\"") && id.is_none());
     }
 }
