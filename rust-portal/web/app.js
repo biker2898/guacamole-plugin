@@ -96,6 +96,11 @@ const SCANCODES = {
   Delete: 0xe053, MetaLeft: 0xe05b, MetaRight: 0xe05c, ContextMenu: 0xe05d,
 };
 
+const MODIFIERS = new Set([
+  "ShiftLeft", "ShiftRight", "ControlLeft", "ControlRight", "AltLeft", "AltRight",
+  "MetaLeft", "MetaRight", "CapsLock", "NumLock", "ScrollLock",
+]);
+
 let current = null;
 
 function setStatus(text) {
@@ -349,6 +354,9 @@ function attachInput(s, video) {
     if (e.target.closest && e.target.closest("dialog, input, textarea, select")) return;
     const c = SCANCODES[e.code];
     if (c === undefined) return;
+    // Held modifiers: send the press once. Windows needs no repeats for them,
+    // and a stream of Shift presses can trigger Sticky Keys.
+    if (e.repeat && MODIFIERS.has(e.code)) return void e.preventDefault();
     const isPaste = down && e.code === "KeyV" && (e.ctrlKey || e.metaKey) && !e.repeat;
     // Ctrl+V keeps its default, so the browser fires a paste event carrying
     // the clipboard (works in Firefox, which refuses clipboard.readText).

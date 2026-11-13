@@ -15,6 +15,7 @@ use ironrdp_graphics::image_processing::PixelFormat;
 use ironrdp_graphics::pointer::DecodedPointer;
 use ironrdp_input::{Database, Operation};
 use ironrdp_pdu::gcc::{ConnectionType, KeyboardType};
+use ironrdp_pdu::input::fast_path::{FastPathInputEvent, KeyboardFlags};
 use ironrdp_pdu::rdp::capability_sets::{MajorPlatformType, RailSupportLevel};
 use ironrdp_pdu::rdp::client_info::{PerformanceFlags, TimezoneInfo};
 use ironrdp_rdpdr::{NoopRdpdrBackend, Rdpdr};
@@ -251,8 +252,8 @@ pub async fn run(
             }
             msg = input_rx.recv() => {
                 let events = match msg {
-                    Some(InputMsg::Ops(ops)) => input.apply(ops),
-                    Some(InputMsg::ReleaseAll) => input.release_all(),
+                    Some(InputMsg::Ops(ops)) => apply_input(&mut input, ops),
+                    Some(InputMsg::ReleaseAll) => input.release_all().into_vec(),
                     Some(InputMsg::Clipboard(text)) => {
                         clip.local = Some(text);
                         if let Some(c) = stage.get_svc_processor_mut::<CliprdrClient>().filter(|c| c.is_ready()) {
@@ -372,6 +373,25 @@ impl Resize {
         }
         Ok(())
     }
+}
+
+/// Turns browser input into RDP events. A key pressed again while held (the
+/// browser's auto-repeat) goes out as a plain press, as a real keyboard's
+/// repeat does; `Database::apply` would send release + press, which Windows
+/// counts as separate taps (five Shift taps turn Sticky Keys on).
+fn apply_input(input: &mut Database, ops: Vec<Operation>) -> Vec<FastPathInputEvent> {
+    let mut events = Vec::new();
+    for op in ops {
+        match op {
+            Operation::KeyPressed(scancode) if input.is_key_pressed(scancode) => {
+                let (extended, code) = scancode.as_u8();
+                let flags = if extended { KeyboardFlags::EXTENDED } else { KeyboardFlags::empty() };
+                events.push(FastPathInputEvent::KeyboardEvent(flags, code));
+            }
+            op => events.extend(input.apply([op])),
+        }
+    }
+    events
 }
 
 /// Clipboard state of one session (text only).
@@ -531,4 +551,25 @@ pub async fn probe(pool: &SqlitePool, id: i64) -> anyhow::Result<()> {
         resized.as_deref().unwrap_or("no answer")
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ironrdp_input::Scancode;
+
+    #[test]
+    fn held_key_repeats_without_release() {
+        let mut input = Database::new();
+        let shift = Scancode::from_u16(0x2a);
+        let press = |input: &mut Database| apply_input(input, vec![Operation::KeyPressed(shift)]);
+        let first = press(&mut input);
+        let repeat = press(&mut input);
+        let release = apply_input(&mut input, vec![Operation::KeyReleased(shift)]);
+        let is_release = |e: &FastPathInputEvent| {
+            matches!(e, FastPathInputEvent::KeyboardEvent(f, 0x2a) if f.contains(KeyboardFlags::RELEASE))
+        };
+        assert_eq!((first.len(), repeat.len(), release.len()), (1, 1, 1));
+        assert!(!is_release(&first[0]) && !is_release(&repeat[0]) && is_release(&release[0]));
+    }
 }
