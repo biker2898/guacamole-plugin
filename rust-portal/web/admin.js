@@ -281,6 +281,7 @@ async function loadTraffic() {
   const body = $("traffic-body");
   body.replaceChildren();
   const rows = r.data.rows;
+  renderTrafficChart(r.data);
   if (!rows.length) {
     body.append(el("tr", {}, el("td", { colspan: "7", class: "note" }, "No traffic in the last 24 hours.")));
     return;
@@ -319,4 +320,139 @@ async function loadTraffic() {
     el("td", {}, fmtBytes(total.out)), el("td", {}, fmtBytes(total.in)),
     el("td", {}, el("strong", {}, fmtBytes(total.out + total.in))),
     el("td", {}, fmtDuration(total.s)), el("td", {}, "")));
+}
+
+// Categorical colors for the dark console (validated on #1b2027: CVD and
+// normal-vision separation, 3:1 contrast). Users past the seventh fold into "Other".
+const SERIES = ["#3987e5", "#d95926", "#199e70", "#c98500", "#d55181", "#008300", "#9085e9"];
+const OTHER = "#6b7380";
+const SVG_NS = "http://www.w3.org/2000/svg";
+
+function svg(tag, attrs) {
+  const e = document.createElementNS(SVG_NS, tag);
+  for (const [k, v] of Object.entries(attrs)) e.setAttribute(k, v);
+  return e;
+}
+
+// Rounded top corners only: the data end of a bar.
+function topRounded(x, y, w, h, r) {
+  r = Math.min(r, w / 2, h);
+  return `M${x},${y + h}V${y + r}Q${x},${y} ${x + r},${y}H${x + w - r}Q${x + w},${y} ${x + w},${y + r}V${y + h}Z`;
+}
+
+function niceStep(max, ticks) {
+  const raw = max / ticks;
+  const mag = 10 ** Math.floor(Math.log10(raw));
+  return [1, 2, 2.5, 5, 10].map((m) => m * mag).find((s) => s >= raw) || raw;
+}
+
+function renderTrafficChart(data) {
+  const box = $("traffic-chart"), legend = $("traffic-legend"), tip = $("traffic-tip");
+  box.replaceChildren();
+  legend.replaceChildren();
+  tip.classList.add("hidden");
+  const { slot, now, series } = data;
+  const first = Math.floor((now - 24 * 3600) / slot) * slot;
+  const slots = [];
+  for (let t = first; t <= now; t += slot) slots.push(t);
+
+  // Series: the seven busiest users by name order (stable while the set is), then Other.
+  const totals = new Map();
+  for (const p of series) totals.set(p.username, (totals.get(p.username) || 0) + p.bytes);
+  const busiest = [...totals.entries()].sort((a, b) => b[1] - a[1]);
+  const named = busiest.slice(0, SERIES.length).map(([u]) => u).sort();
+  const color = new Map(named.map((u, i) => [u, SERIES[i]]));
+  const keys = [...named];
+  if (busiest.length > SERIES.length) keys.push("Other");
+  const colorOf = (k) => color.get(k) || OTHER;
+
+  const cells = new Map(slots.map((t) => [t, new Map()]));
+  for (const p of series) {
+    const k = color.has(p.username) ? p.username : "Other";
+    const c = cells.get(p.slot);
+    if (c) c.set(k, (c.get(k) || 0) + p.bytes);
+  }
+  const stackTotal = (t) => [...cells.get(t).values()].reduce((a, b) => a + b, 0);
+  const max = Math.max(0, ...slots.map(stackTotal));
+  let peak = null;
+  for (const t of slots) if (!peak || stackTotal(t) > stackTotal(peak)) peak = t;
+  const clock = (t) => new Date(t * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  $("traffic-peak").textContent = max ? `Busiest: ${clock(peak)}, ${fmtBytes(max)}` : "";
+
+  // Legend with each user's 24-hour total, so identity never rests on color alone.
+  for (const k of keys) {
+    const sum = k === "Other"
+      ? busiest.slice(SERIES.length).reduce((a, [, b]) => a + b, 0)
+      : totals.get(k);
+    legend.append(el("span", {}, el("i", { style: `background:${colorOf(k)}` }), k, el("b", {}, fmtBytes(sum))));
+  }
+  if (!max) {
+    box.append(el("p", { class: "note" }, "No traffic yet."));
+    return;
+  }
+
+  const W = Math.max(320, box.clientWidth || 800), H = 220;
+  const pad = { l: 52, r: 8, t: 8, b: 22 };
+  const plotW = W - pad.l - pad.r, plotH = H - pad.t - pad.b;
+  const step = niceStep(max, 4);
+  const top = Math.ceil(max / step) * step;
+  const y = (v) => pad.t + plotH - (v / top) * plotH;
+  const colW = plotW / slots.length;
+  const barW = Math.max(2, colW - 2);
+  const root = svg("svg", { viewBox: `0 0 ${W} ${H}`, role: "img", "aria-label": "Traffic per user per half hour, last 24 hours" });
+
+  for (let v = 0; v <= top + 1e-9; v += step) {
+    root.append(svg("line", { class: "grid", x1: pad.l, x2: W - pad.r, y1: y(v), y2: y(v) }));
+    const label = svg("text", { x: pad.l - 6, y: y(v) + 4, "text-anchor": "end" });
+    label.textContent = fmtBytes(v);
+    root.append(label);
+  }
+  // Hour labels every 3 h, or every 6 h when 3 h of columns is too narrow for one.
+  const every = colW * 6 >= 44 ? 3 : 6;
+  slots.forEach((t, i) => {
+    const x = pad.l + i * colW + 1;
+    const d = new Date(t * 1000);
+    if (d.getMinutes() === 0 && d.getHours() % every === 0) {
+      const label = svg("text", { x: x + barW / 2, y: H - 6, "text-anchor": "middle" });
+      label.textContent = `${String(d.getHours()).padStart(2, "0")}:00`;
+      root.append(label);
+    }
+    // Stack in legend order; a 2px surface gap between segments.
+    let base = 0;
+    const c = cells.get(t);
+    const parts = keys.filter((k) => c.get(k));
+    parts.forEach((k, j) => {
+      const v = c.get(k);
+      const y0 = y(base), y1 = y(base + v);
+      const h = Math.max(1, y0 - y1 - (j ? 2 : 0));
+      const yTop = y0 - (j ? 2 : 0) - h;
+      root.append(j === parts.length - 1
+        ? svg("path", { d: topRounded(x, yTop, barW, h, 4), fill: colorOf(k) })
+        : svg("rect", { x, y: yTop, width: barW, height: h, fill: colorOf(k) }));
+      base += v;
+    });
+    // Hit target: the whole column, wider than the bar.
+    const hit = svg("rect", { class: "hit", x: pad.l + i * colW, y: pad.t, width: colW, height: plotH });
+    const show = () => {
+      for (const h of root.querySelectorAll(".hit.on")) h.classList.remove("on");
+      hit.classList.add("on");
+      tip.replaceChildren(el("div", { class: "muted" }, `${clock(t)} – ${clock(t + slot)}`));
+      for (const k of [...parts].reverse()) {
+        tip.append(el("div", {}, el("span", {}, el("i", { style: `background:${colorOf(k)}` }), " ", k), el("b", {}, fmtBytes(c.get(k)))));
+      }
+      tip.append(el("div", { class: "muted" }, "Total", el("b", {}, fmtBytes(stackTotal(t)))));
+      tip.classList.remove("hidden");
+      const card = box.parentElement.getBoundingClientRect(), svgBox = root.getBoundingClientRect();
+      const px = (pad.l + (i + 0.5) * colW) * (svgBox.width / W) + svgBox.left - card.left;
+      const left = px + 12 + tip.offsetWidth > card.width ? px - 12 - tip.offsetWidth : px + 12;
+      tip.style.left = `${Math.max(4, left)}px`;
+      tip.style.top = `${svgBox.top - card.top + 8}px`;
+    };
+    hit.addEventListener("mouseenter", show);
+    hit.addEventListener("click", show);
+    hit.addEventListener("mouseleave", () => { hit.classList.remove("on"); tip.classList.add("hidden"); });
+    root.append(hit);
+  });
+  root.append(svg("line", { class: "grid", x1: pad.l, x2: W - pad.r, y1: y(0), y2: y(0) }));
+  box.append(root);
 }

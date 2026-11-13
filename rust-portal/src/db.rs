@@ -304,6 +304,29 @@ pub async fn traffic_since(pool: &SqlitePool, since: i64) -> sqlx::Result<Vec<Tr
     .await
 }
 
+#[derive(Serialize, FromRow)]
+pub struct TrafficPoint {
+    pub username: String,
+    /// Start of the slot, unix time.
+    pub slot: i64,
+    pub bytes: i64,
+}
+
+/// Traffic per user in `slot`-second slots since `since`, for the chart.
+pub async fn traffic_series(pool: &SqlitePool, since: i64, slot: i64) -> sqlx::Result<Vec<TrafficPoint>> {
+    sqlx::query_as(
+        "SELECT u.username, (t.bucket / ?1) * ?1 AS slot, SUM(t.bytes_out + t.bytes_in) AS bytes
+         FROM traffic t JOIN users u ON u.id = t.user_id
+         WHERE t.bucket >= ?2
+         GROUP BY t.user_id, slot
+         ORDER BY slot",
+    )
+    .bind(slot)
+    .bind(since - since.rem_euclid(TRAFFIC_BUCKET))
+    .fetch_all(pool)
+    .await
+}
+
 pub async fn delete_user(pool: &SqlitePool, id: i64) -> sqlx::Result<()> {
     sqlx::query("DELETE FROM users WHERE id = ?").bind(id).execute(pool).await?;
     Ok(())

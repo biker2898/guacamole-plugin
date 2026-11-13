@@ -703,10 +703,15 @@ async fn admin_traffic(State(app): AppState, headers: HeaderMap) -> Response {
     if let Err(r) = require_admin(&app, &headers, false).await {
         return r;
     }
+    const SLOT: i64 = 1800;
     let since = db::now_unix() - 24 * 3600;
-    match db::traffic_since(&app.pool, since).await {
-        Ok(rows) => Json(json!({ "since": since, "rows": rows })).into_response(),
-        Err(e) => db_error("traffic", e),
+    let (rows, series) = tokio::join!(db::traffic_since(&app.pool, since), db::traffic_series(&app.pool, since, SLOT));
+    match (rows, series) {
+        (Ok(rows), Ok(series)) => {
+            Json(json!({ "since": since, "now": db::now_unix(), "slot": SLOT, "rows": rows, "series": series }))
+                .into_response()
+        }
+        (Err(e), _) | (_, Err(e)) => db_error("traffic", e),
     }
 }
 
@@ -924,6 +929,7 @@ mod tests {
         let row = &traffic["rows"][0];
         assert_eq!((row["username"].as_str(), row["bytes_out"].as_i64(), row["bytes_in"].as_i64(), row["seconds"].as_i64()),
             (Some("biker"), Some(1500), Some(15), Some(60)));
+        assert_eq!(traffic["series"][0]["bytes"].as_i64(), Some(1515));
         let (s, _, _) = call(&t, "GET", "/api/admin/traffic", Some(&worker_cookie), false, None).await;
         assert_eq!(s, StatusCode::FORBIDDEN);
     }
