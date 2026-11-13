@@ -99,6 +99,7 @@ pub(crate) fn router(config: Config, pool: SqlitePool) -> Router {
             post(admin_update_connection).delete(admin_delete_connection),
         )
         .route("/api/admin/sessions", get(admin_sessions))
+        .route("/api/admin/traffic", get(admin_traffic))
         .route("/api/admin/sessions/{id}/end", post(admin_end_session))
         .with_state(app)
 }
@@ -357,7 +358,7 @@ async fn session_ws(
             },
         );
         let _guard = LiveGuard(app.clone(), id);
-        crate::session::run(socket, conn, config, user.username, stop).await;
+        crate::session::run(socket, conn, config, user.username, user.id, app.pool.clone(), stop).await;
     })
 }
 
@@ -697,6 +698,18 @@ async fn admin_sessions(State(app): AppState, headers: HeaderMap) -> Response {
     Json(list).into_response()
 }
 
+/// Media traffic per user and computer over the last 24 hours.
+async fn admin_traffic(State(app): AppState, headers: HeaderMap) -> Response {
+    if let Err(r) = require_admin(&app, &headers, false).await {
+        return r;
+    }
+    let since = db::now_unix() - 24 * 3600;
+    match db::traffic_since(&app.pool, since).await {
+        Ok(rows) => Json(json!({ "since": since, "rows": rows })).into_response(),
+        Err(e) => db_error("traffic", e),
+    }
+}
+
 async fn admin_end_session(State(app): AppState, headers: HeaderMap, Path(id): Path<u64>) -> Response {
     let admin = match require_admin(&app, &headers, true).await {
         Ok(a) => a,
@@ -902,5 +915,16 @@ mod tests {
         assert_eq!(s, StatusCode::OK);
         let (_, sessions, _) = call(&t, "GET", "/api/admin/sessions", Some(&biker_cookie), false, None).await;
         assert_eq!(sessions, json!([]));
+
+        // Traffic: two writes in the same bucket add up.
+        db::add_traffic(&t.pool, biker, 7, 1000, 10, 30).await.unwrap();
+        db::add_traffic(&t.pool, biker, 7, 500, 5, 30).await.unwrap();
+        let (s, traffic, _) = call(&t, "GET", "/api/admin/traffic", Some(&biker_cookie), false, None).await;
+        assert_eq!(s, StatusCode::OK);
+        let row = &traffic["rows"][0];
+        assert_eq!((row["username"].as_str(), row["bytes_out"].as_i64(), row["bytes_in"].as_i64(), row["seconds"].as_i64()),
+            (Some("biker"), Some(1500), Some(15), Some(60)));
+        let (s, _, _) = call(&t, "GET", "/api/admin/traffic", Some(&worker_cookie), false, None).await;
+        assert_eq!(s, StatusCode::FORBIDDEN);
     }
 }

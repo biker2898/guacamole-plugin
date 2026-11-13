@@ -2,7 +2,7 @@
 //! one UDP socket per session), the RDP task and the encoder thread.
 
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
@@ -309,18 +309,63 @@ async fn send_json(ws: &mut WebSocket, value: serde_json::Value) {
     let _ = ws.send(Message::Text(value.to_string().into())).await;
 }
 
+/// Media bytes of one session (UDP payloads both ways), written to the
+/// database every minute and at the end.
+pub struct Traffic {
+    out: AtomicU64,
+    r#in: AtomicU64,
+    /// Start of the time not yet written.
+    since: Mutex<Instant>,
+}
+
+const TRAFFIC_FLUSH: Duration = Duration::from_secs(60);
+
+async fn flush_traffic(pool: &sqlx::SqlitePool, user_id: i64, connection_id: i64, t: &Traffic) {
+    let out = t.out.swap(0, Ordering::Relaxed);
+    let r#in = t.r#in.swap(0, Ordering::Relaxed);
+    let seconds = {
+        let mut since = t.since.lock().unwrap();
+        let secs = since.elapsed().as_secs();
+        *since += Duration::from_secs(secs);
+        secs as i64
+    };
+    if out == 0 && r#in == 0 && seconds == 0 {
+        return;
+    }
+    if let Err(e) = crate::db::add_traffic(pool, user_id, connection_id, out, r#in, seconds).await {
+        warn!("record traffic: {e}");
+    }
+}
+
 pub async fn run(
     mut ws: WebSocket,
     conn: Connection,
     config: Arc<Config>,
     username: String,
+    user_id: i64,
+    pool: sqlx::SqlitePool,
     stop: Arc<tokio::sync::Notify>,
 ) {
     let id = conn.id;
     info!(user = %username, connection = id, "session start");
+    let traffic = Arc::new(Traffic { out: AtomicU64::new(0), r#in: AtomicU64::new(0), since: Mutex::new(Instant::now()) });
+    let flusher = {
+        let (traffic, pool) = (traffic.clone(), pool.clone());
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval_at(tokio::time::Instant::now() + TRAFFIC_FLUSH, TRAFFIC_FLUSH);
+            loop {
+                tick.tick().await;
+                flush_traffic(&pool, user_id, id, &traffic).await;
+            }
+        })
+    };
     // Every log line of the session (stats, WebRTC, errors) names the user.
     let span = tracing::info_span!("session", user = %username, connection = id);
-    let reason = match run_inner(&mut ws, conn, &config, &stop).instrument(span).await {
+    let result = run_inner(&mut ws, conn, &config, &stop, &traffic).instrument(span).await;
+    flusher.abort();
+    // What came after the last minute's write.
+    flush_traffic(&pool, user_id, id, &traffic).await;
+    let reason = match result {
         Ok(reason) => reason.to_owned(),
         Err(e) => {
             // The browser reconnects by itself after a retryable error.
@@ -378,6 +423,7 @@ async fn run_inner(
     conn: Connection,
     config: &Config,
     stop: &tokio::sync::Notify,
+    traffic: &Traffic,
 ) -> anyhow::Result<&'static str> {
     // 1. The browser sends its offer and screen size.
     let start: Start = loop {
@@ -447,6 +493,7 @@ async fn run_inner(
             match rtc.poll_output() {
                 Ok(Output::Timeout(t)) => break t,
                 Ok(Output::Transmit(t)) => {
+                    traffic.out.fetch_add(t.contents.len() as u64, Ordering::Relaxed);
                     let _ = socket.send_to(&t.contents, t.destination).await;
                 }
                 Ok(Output::Event(event)) => match event {
@@ -547,6 +594,7 @@ async fn run_inner(
         let input = tokio::select! {
             r = socket.recv_from(&mut buf) => {
                 let (n, source) = r?;
+                traffic.r#in.fetch_add(n as u64, Ordering::Relaxed);
                 match buf[..n].try_into() {
                     Ok(contents) => Input::Receive(
                         Instant::now(),

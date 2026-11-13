@@ -40,15 +40,17 @@ async function openAdmin() {
 function selectTab(name) {
   admin.tab = name;
   for (const b of $("admin-tabs").querySelectorAll("button")) b.classList.toggle("active", b.dataset.tab === name);
-  for (const t of ["users", "computers", "sessions"]) $("tab-" + t).classList.toggle("hidden", t !== name);
+  for (const t of ["users", "computers", "sessions", "traffic"]) $("tab-" + t).classList.toggle("hidden", t !== name);
   clearInterval(admin.timer);
-  if (name === "sessions") {
-    loadSessions();
+  const poll = (load, ms) => {
+    load();
     admin.timer = setInterval(() => {
       if ($("admin").classList.contains("hidden")) clearInterval(admin.timer);
-      else loadSessions();
-    }, 5000);
-  }
+      else load();
+    }, ms);
+  };
+  if (name === "sessions") poll(loadSessions, 5000);
+  if (name === "traffic") poll(loadTraffic, 60000);
 }
 
 async function loadAll() {
@@ -257,4 +259,64 @@ async function loadSessions() {
       }, "End")),
     ));
   }
+}
+
+// ---------- traffic ----------
+
+const fmtBytes = (n) => {
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let i = 0;
+  while (n >= 1000 && i < units.length - 1) { n /= 1000; i++; }
+  return `${n < 10 && i ? n.toFixed(1) : Math.round(n)} ${units[i]}`;
+};
+const fmtDuration = (s) => {
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60);
+  return h ? `${h} h ${m} min` : `${m} min`;
+};
+const fmtRate = (bytes, s) => (s > 0 ? `${Math.round((bytes * 8) / s / 1000)} kbps` : "–");
+
+async function loadTraffic() {
+  const r = await api("/api/admin/traffic");
+  if (!adminError(r)) return;
+  const body = $("traffic-body");
+  body.replaceChildren();
+  const rows = r.data.rows;
+  if (!rows.length) {
+    body.append(el("tr", {}, el("td", { colspan: "7", class: "note" }, "No traffic in the last 24 hours.")));
+    return;
+  }
+  // One line per user (busiest first), then one per computer when a user used several.
+  const users = new Map();
+  for (const row of rows) {
+    const u = users.get(row.username) || { username: row.username, out: 0, in: 0, s: 0, parts: [] };
+    u.out += row.bytes_out;
+    u.in += row.bytes_in;
+    u.s += row.seconds;
+    u.parts.push(row);
+    users.set(row.username, u);
+  }
+  const sorted = [...users.values()].sort((a, b) => b.out + b.in - (a.out + a.in));
+  const line = (name, computer, out, inn, s, sub) => el("tr", sub ? { class: "sub" } : {},
+    el("td", {}, name),
+    el("td", {}, computer),
+    el("td", {}, fmtBytes(out)),
+    el("td", {}, fmtBytes(inn)),
+    el("td", {}, sub ? fmtBytes(out + inn) : el("strong", {}, fmtBytes(out + inn))),
+    el("td", {}, fmtDuration(s)),
+    el("td", {}, fmtRate(out + inn, s)),
+  );
+  const total = { out: 0, in: 0, s: 0 };
+  for (const u of sorted) {
+    const computer = u.parts.length === 1 ? (u.parts[0].connection || "(removed)") : `${u.parts.length} computers`;
+    body.append(line(u.username, computer, u.out, u.in, u.s, false));
+    if (u.parts.length > 1) {
+      for (const p of u.parts) body.append(line("", p.connection || "(removed)", p.bytes_out, p.bytes_in, p.seconds, true));
+    }
+    total.out += u.out; total.in += u.in; total.s += u.s;
+  }
+  body.append(el("tr", { class: "total" },
+    el("td", {}, el("strong", {}, "All users")), el("td", {}, ""),
+    el("td", {}, fmtBytes(total.out)), el("td", {}, fmtBytes(total.in)),
+    el("td", {}, el("strong", {}, fmtBytes(total.out + total.in))),
+    el("td", {}, fmtDuration(total.s)), el("td", {}, "")));
 }

@@ -53,6 +53,8 @@
   th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); white-space: nowrap; }
   th { color: var(--muted); font-weight: 500; background: var(--panel); }
   tr:last-child td { border-bottom: 0; }
+  tr.sub td { color: var(--muted); font-size: 13px; padding-top: 4px; padding-bottom: 4px; }
+  tr.total td { border-top: 2px solid var(--line); }
   td.actions { text-align: right; }
   .tag { display: inline-block; font-size: 12px; padding: 1px 7px; border-radius: 10px; background: #2c333d; color: var(--muted); }
   .tag.on { background: #1f3a5f; color: #9cc2ff; }
@@ -130,6 +132,7 @@
     <button data-tab="users" class="active">Users</button>
     <button data-tab="computers">Computers</button>
     <button data-tab="sessions">Active sessions</button>
+    <button data-tab="traffic">Traffic</button>
   </div>
   <div id="tab-users">
     <div class="toolbar"><button class="btn" id="add-user">Add user</button>
@@ -146,6 +149,11 @@
     <p class="note">Sessions on this portal only (not Guacamole). Refreshes every 5 seconds.</p>
     <div class="scroll"><table><thead><tr><th>User</th><th>Computer</th><th>Since</th><th></th></tr></thead>
       <tbody id="sessions-body"></tbody></table></div>
+  </div>
+  <div id="tab-traffic" class="hidden">
+    <p class="note">Video, sound and input between this portal and each user's browser, last 24 hours. Refreshes every minute.</p>
+    <div class="scroll"><table><thead><tr><th>User</th><th>Computer</th><th>To user</th><th>From user</th><th>Total</th><th>Connected</th><th>Average</th></tr></thead>
+      <tbody id="traffic-body"></tbody></table></div>
   </div>
   <div class="error" id="admin-error"></div>
 </div>

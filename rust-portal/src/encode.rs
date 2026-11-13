@@ -34,6 +34,11 @@ const MIN_FRAME_INTERVAL: Duration = Duration::from_millis(33);
 /// text that was blurred during motion.
 const SETTLE_FRAMES: u32 = 4;
 const SETTLE_INTERVAL: Duration = Duration::from_millis(150);
+/// On a still screen, a frame at least this often. Chrome asks for a
+/// keyframe when RTP keeps arriving (bandwidth probes) but no frame has come
+/// for 3 s; a fully static desktop then got a 50 KB keyframe every 3 s.
+/// An unchanged frame encodes to a small P-frame instead.
+const IDLE_HEARTBEAT: Duration = Duration::from_secs(1);
 /// Longest wait after a large frame before the next one. Pacing by the
 /// estimate alone stalled the picture for seconds when a full-screen change
 /// (Excel scrolling) met a low estimate; str0m's pacer smooths the rest.
@@ -112,6 +117,8 @@ fn run(shared: &Shared, max_bitrate: u32, tx: &mpsc::Sender<Frame>) -> anyhow::R
     let mut last_frame = Instant::now() - Duration::from_secs(1);
     let mut budget_until = Instant::now();
     let mut settle = 0u32;
+    // When a frame last actually went out (rate control may skip some).
+    let mut last_sent = Instant::now();
     let mut stats = (Instant::now(), 0u32, 0usize);
 
     loop {
@@ -120,7 +127,8 @@ fn run(shared: &Shared, max_bitrate: u32, tx: &mpsc::Sender<Frame>) -> anyhow::R
         if flags.stop {
             return Ok(());
         }
-        if !flags.dirty && !flags.keyframe && settle == 0 {
+        let heartbeat = last_sent.elapsed() >= IDLE_HEARTBEAT;
+        if !flags.dirty && !flags.keyframe && settle == 0 && !heartbeat {
             continue;
         }
 
@@ -190,6 +198,7 @@ fn run(shared: &Shared, max_bitrate: u32, tx: &mpsc::Sender<Frame>) -> anyhow::R
             // Skipped by rate control.
             continue;
         }
+        last_sent = last_frame;
 
         let bits = u64::try_from(data.len()).unwrap_or(u64::MAX).saturating_mul(8);
         budget_until = last_frame
@@ -246,4 +255,5 @@ mod tests {
         }
     }
 }
+
 

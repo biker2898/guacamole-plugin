@@ -245,6 +245,65 @@ pub async fn reset_totp(pool: &SqlitePool, id: i64) -> sqlx::Result<()> {
     Ok(())
 }
 
+/// Length of one traffic bucket, seconds.
+const TRAFFIC_BUCKET: i64 = 600;
+/// How long traffic rows are kept, seconds.
+const TRAFFIC_KEEP: i64 = 8 * 24 * 3600;
+
+/// Adds media traffic of one session to the current bucket.
+pub async fn add_traffic(
+    pool: &SqlitePool,
+    user_id: i64,
+    connection_id: i64,
+    bytes_out: u64,
+    bytes_in: u64,
+    seconds: i64,
+) -> sqlx::Result<()> {
+    let now = now_unix();
+    let bucket = now - now.rem_euclid(TRAFFIC_BUCKET);
+    sqlx::query(
+        "INSERT INTO traffic (user_id, connection_id, bucket, bytes_out, bytes_in, seconds) VALUES (?, ?, ?, ?, ?, ?)
+         ON CONFLICT (user_id, connection_id, bucket) DO UPDATE SET
+             bytes_out = bytes_out + excluded.bytes_out,
+             bytes_in = bytes_in + excluded.bytes_in,
+             seconds = seconds + excluded.seconds",
+    )
+    .bind(user_id)
+    .bind(connection_id)
+    .bind(bucket)
+    .bind(i64::try_from(bytes_out).unwrap_or(i64::MAX))
+    .bind(i64::try_from(bytes_in).unwrap_or(i64::MAX))
+    .bind(seconds)
+    .execute(pool)
+    .await?;
+    sqlx::query("DELETE FROM traffic WHERE bucket < ?").bind(now - TRAFFIC_KEEP).execute(pool).await?;
+    Ok(())
+}
+
+#[derive(Serialize, FromRow)]
+pub struct TrafficRow {
+    pub username: String,
+    pub connection: Option<String>,
+    pub bytes_out: i64,
+    pub bytes_in: i64,
+    pub seconds: i64,
+}
+
+/// Traffic per user and computer since `since` (unix time), busiest first.
+pub async fn traffic_since(pool: &SqlitePool, since: i64) -> sqlx::Result<Vec<TrafficRow>> {
+    sqlx::query_as(
+        "SELECT u.username, c.name AS connection,
+                SUM(t.bytes_out) AS bytes_out, SUM(t.bytes_in) AS bytes_in, SUM(t.seconds) AS seconds
+         FROM traffic t JOIN users u ON u.id = t.user_id LEFT JOIN connections c ON c.id = t.connection_id
+         WHERE t.bucket >= ?
+         GROUP BY t.user_id, t.connection_id
+         ORDER BY SUM(t.bytes_out) + SUM(t.bytes_in) DESC",
+    )
+    .bind(since - since.rem_euclid(TRAFFIC_BUCKET))
+    .fetch_all(pool)
+    .await
+}
+
 pub async fn delete_user(pool: &SqlitePool, id: i64) -> sqlx::Result<()> {
     sqlx::query("DELETE FROM users WHERE id = ?").bind(id).execute(pool).await?;
     Ok(())
