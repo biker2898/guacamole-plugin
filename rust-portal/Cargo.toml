@@ -24,6 +24,8 @@ ironrdp-svc = "0.10"
 ironrdp-tls = { version = "0.3", features = ["rustls"] }
 ironrdp-tokio = "0.12"
 openh264 = "0.9"
+# Raw SetOption types (same version as openh264 uses).
+openh264-sys2 = "0.9"
 opus = "0.4"
 qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 rand = "0.9"

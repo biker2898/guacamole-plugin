@@ -26,6 +26,8 @@
   #hud { position: fixed; top: 6px; right: 8px; display: flex; align-items: center; background: rgba(0,0,0,.6); color: #cfd6df; font: 12px ui-monospace, monospace; padding: 4px 8px 4px 4px; border-radius: 4px; pointer-events: auto; user-select: none; z-index: 10; }
   #hud-grip { cursor: grab; padding: 0 6px 0 2px; color: #8a94a0; touch-action: none; letter-spacing: -2px; }
   #hud.dragging #hud-grip { cursor: grabbing; }
+  #hud.collapsed #hud-more { display: none; }
+  #hud #hud-toggle { margin-left: 6px; padding: 0 6px; }
   #hud button { width: auto; margin: 0 0 0 8px; padding: 2px 8px; font-size: 12px; background: #333; }
   #hud select { width: auto; margin: 0 0 0 8px; padding: 1px 4px; font-size: 12px; background: #333; color: #cfd6df; border: 0; border-radius: 3px; }
   .res-pick { display: flex; align-items: center; justify-content: flex-end; gap: 8px; margin-top: 12px; color: var(--muted); font-size: 13px; }
@@ -119,7 +121,7 @@
       </div>
     </form>
   </dialog>
-  <div id="hud"><span id="hud-grip" title="Drag to move">⋮⋮</span><span id="stats">…</span><select id="hud-res" title="Screen size"></select><button id="paste" title="Send your clipboard text to the computer and paste it">Paste</button><button id="fullscreen">Full screen</button><button id="leave">Leave</button></div>
+  <div id="hud" class="collapsed"><span id="hud-grip" title="Drag to move">⋮⋮</span><span id="stats">…</span><span id="hud-more"><select id="hud-res" title="Screen size"></select><button id="paste" title="Send your clipboard text to the computer and paste it">Paste</button><button id="fullscreen">Full screen</button><button id="leave">Leave</button></span><button id="hud-toggle" title="Show controls">☰</button></div>
 </div>
 
 <div id="admin" class="hidden">

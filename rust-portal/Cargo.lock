@@ -2690,6 +2690,7 @@ dependencies = [
  "ironrdp-tls",
  "ironrdp-tokio",
  "openh264",
+ "openh264-sys2",
  "opus",
  "qrcode",
  "rand 0.9.5",

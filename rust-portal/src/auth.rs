@@ -195,8 +195,9 @@ mod tests {
         // A real time step (about 59 million in 2026), not step / 30.
         let now_step = (crate::db::now_unix() / 30) as i64;
         assert!((now_step - 1..=now_step + 1).contains(&step), "{step} vs {now_step}");
-        let (uri, svg) = totp_enrollment("rust.example", "a b", &secret);
-        assert!(uri.starts_with("otpauth://totp/rust.example:a%20b?secret="));
+        let (uri, svg) = totp_enrollment("2FA SW", "a b", &secret);
+        assert!(uri.starts_with("otpauth://totp/2FA%20SW:a%20b?secret="));
+        assert!(uri.contains("&issuer=2FA%20SW&"));
         assert!(svg.contains("<svg"));
     }
 

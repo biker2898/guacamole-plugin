@@ -21,7 +21,7 @@ use str0m::net::{Protocol, Receive};
 use str0m::{Candidate, Event, IceConnectionState, Input, Output, Rtc};
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
-use tracing::{debug, info, warn};
+use tracing::{Instrument as _, debug, info, warn};
 
 use crate::Config;
 use crate::db::Connection;
@@ -41,6 +41,8 @@ pub struct Shared {
     wake: Condvar,
     /// Latest send-side bandwidth estimate, bits per second.
     pub target_bps: AtomicU32,
+    /// Bitrate the encoder currently aims for (for the stats log).
+    pub tier_bps: AtomicU32,
 }
 
 impl Shared {
@@ -50,6 +52,7 @@ impl Shared {
             flags: Mutex::new(Flags::default()),
             wake: Condvar::new(),
             target_bps: AtomicU32::new(initial_bps),
+            tier_bps: AtomicU32::new(0),
         })
     }
 
@@ -315,7 +318,9 @@ pub async fn run(
 ) {
     let id = conn.id;
     info!(user = %username, connection = id, "session start");
-    let reason = match run_inner(&mut ws, conn, &config, &stop).await {
+    // Every log line of the session (stats, WebRTC, errors) names the user.
+    let span = tracing::info_span!("session", user = %username, connection = id);
+    let reason = match run_inner(&mut ws, conn, &config, &stop).instrument(span).await {
         Ok(reason) => reason.to_owned(),
         Err(e) => {
             // The browser reconnects by itself after a retryable error.
@@ -396,6 +401,7 @@ async fn run_inner(
         .enable_h264(true)
         .enable_opus(true, false)
         .enable_bwe(Some(Bitrate::kbps(800)))
+        .set_stats_interval(Some(LINK_STATS_INTERVAL))
         .build(Instant::now());
     rtc.add_local_candidate(Candidate::host(public, "udp")?);
     let offer = SdpOffer::from_sdp_string(&start.offer).context("bad SDP offer")?;
@@ -421,6 +427,7 @@ async fn run_inner(
     let mut video: Option<(Mid, str0m::format::PayloadParams)> = None;
     let mut audio: Option<(Mid, str0m::format::PayloadParams)> = None;
     let mut dc = DcOut::default();
+    let mut link = LinkStats::new();
     // RTP time of the next sound packet (48 kHz), and when the last one went out.
     let mut audio_ts: u64 = 0;
     let mut audio_last: Option<Instant> = None;
@@ -490,6 +497,13 @@ async fn run_inner(
                     Event::EgressBitrateEstimate(BweKind::Twcc { estimate, .. }) => {
                         let bps = u32::try_from(estimate.as_u64()).unwrap_or(u32::MAX);
                         shared.target_bps.store(bps.min(config.max_bitrate), Ordering::Relaxed);
+                        link.estimate(bps);
+                    }
+                    Event::MediaEgressStats(m) if video.as_ref().is_some_and(|v| v.0 == m.mid) => {
+                        link.media(m.nacks, m.plis + m.firs, m.loss);
+                    }
+                    Event::PeerStats(p) => {
+                        link.log(&p, shared.tier_bps.load(Ordering::Relaxed));
                     }
                     Event::ChannelData(data) => match serde_json::from_slice::<ClientInput>(&data.data) {
                         Ok(ClientInput::Clip { d, more }) => {
@@ -544,6 +558,7 @@ async fn run_inner(
             _ = tokio::time::sleep_until(sleep_until) => Input::Timeout(Instant::now()),
             frame = frame_rx.recv() => {
                 let Some(frame) = frame else { break Ok("encoder stopped") };
+                link.frame(frame.data.len(), frame.keyframe, frame.encode_ms);
                 if let (true, Some((mid, params))) = (connected, &video) {
                     if let Some(writer) = rtc.writer(*mid) {
                         let ts = MediaTime::from_90khz(started.elapsed().as_micros() as u64 * 9 / 100);
@@ -552,7 +567,6 @@ async fn run_inner(
                         }
                     }
                 }
-                let _ = frame.keyframe;
                 continue;
             }
             Some(event) = events_rx.recv() => {
@@ -610,6 +624,95 @@ async fn run_inner(
     }
     let _ = tokio::task::spawn_blocking(move || encoder.join()).await;
     result
+}
+
+/// How often each session logs its link quality.
+const LINK_STATS_INTERVAL: Duration = Duration::from_secs(30);
+
+/// Per-session numbers for the periodic `link` log line: what the network
+/// estimate did, what the encoder sent, and what the browser reported.
+struct LinkStats {
+    est_min: u32,
+    est_max: u32,
+    frames: u32,
+    bytes: u64,
+    keyframes: u32,
+    max_frame: usize,
+    max_encode_ms: u32,
+    /// Cumulative counters from the browser's RTCP, and their last logged values.
+    nacks: u64,
+    plis: u64,
+    logged_nacks: u64,
+    logged_plis: u64,
+    /// Fraction of video packets the browser reports lost.
+    loss: Option<f32>,
+    since: Instant,
+}
+
+impl LinkStats {
+    fn new() -> Self {
+        Self {
+            est_min: u32::MAX,
+            est_max: 0,
+            frames: 0,
+            bytes: 0,
+            keyframes: 0,
+            max_frame: 0,
+            max_encode_ms: 0,
+            nacks: 0,
+            plis: 0,
+            logged_nacks: 0,
+            logged_plis: 0,
+            loss: None,
+            since: Instant::now(),
+        }
+    }
+
+    fn estimate(&mut self, bps: u32) {
+        self.est_min = self.est_min.min(bps);
+        self.est_max = self.est_max.max(bps);
+    }
+
+    fn frame(&mut self, len: usize, keyframe: bool, encode_ms: u32) {
+        self.max_encode_ms = self.max_encode_ms.max(encode_ms);
+        self.frames += 1;
+        self.bytes += len as u64;
+        self.keyframes += u32::from(keyframe);
+        self.max_frame = self.max_frame.max(len);
+    }
+
+    fn media(&mut self, nacks: u64, plis: u64, loss: Option<f32>) {
+        self.nacks = nacks;
+        self.plis = plis;
+        if loss.is_some() {
+            self.loss = loss;
+        }
+    }
+
+    fn log(&mut self, peer: &str0m::stats::PeerStats, tier: u32) {
+        let secs = self.since.elapsed().as_secs_f64().max(1.0);
+        let kbps = |b: u32| if b == u32::MAX { 0 } else { b / 1000 };
+        info!(
+            rtt_ms = peer.rtt.map_or(-1, |d| d.as_millis() as i64),
+            loss_pct = format_args!("{:.1}", self.loss.or(peer.egress_loss_fraction).unwrap_or(0.0) * 100.0),
+            est_kbps = format_args!("{}-{}", kbps(self.est_min), kbps(self.est_max)),
+            enc_kbps = tier / 1000,
+            sent_kbps = (self.bytes as f64 * 8.0 / secs / 1000.0) as u64,
+            fps = format_args!("{:.1}", f64::from(self.frames) / secs),
+            keyframes = self.keyframes,
+            max_frame_kb = self.max_frame / 1024,
+            max_encode_ms = self.max_encode_ms,
+            nacks = self.nacks - self.logged_nacks.min(self.nacks),
+            plis = self.plis - self.logged_plis.min(self.plis),
+            "link"
+        );
+        let (nacks, plis) = (self.nacks, self.plis);
+        *self = Self::new();
+        self.logged_nacks = nacks;
+        self.logged_plis = plis;
+        self.nacks = nacks;
+        self.plis = plis;
+    }
 }
 
 struct StopOnDrop(Arc<Shared>);

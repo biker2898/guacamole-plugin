@@ -375,11 +375,26 @@ function attachInput(s, video) {
     send(s, { t: "b", b: e.button, d: false, ...remotePos(s, video, e) });
   });
   on(video, "contextmenu", (e) => e.preventDefault());
+  // Wheel: one Windows notch (120) per mouse-wheel click. Touchpads and
+  // smooth-scrolling mice fire many small events per click; each used to be
+  // sent as a full notch, so Excel scrolled far past where the user stopped
+  // and kept scrolling after. Deltas now add up until they make a notch.
+  const wheel = { x: 0, y: 0 };
+  const NOTCH = { 0: 100, 1: 3, 2: 1 }; // pixels, lines or pages per notch (deltaMode)
   on(video, "wheel", (e) => {
     e.preventDefault();
-    const dy = e.deltaY, dx = e.deltaX;
-    if (dy) send(s, { t: "w", v: dy > 0 ? -120 : 120 });
-    if (dx) send(s, { t: "w", v: dx > 0 ? 120 : -120, h: true });
+    const per = NOTCH[e.deltaMode] || 100;
+    // A change of direction starts over.
+    const add = (acc, d) => (acc * d < 0 ? 0 : acc) + d / per;
+    wheel.y = add(wheel.y, e.deltaY);
+    wheel.x = add(wheel.x, e.deltaX);
+    // Never more than a few notches per event, whatever the browser reports.
+    const take = (v) => Math.max(-4, Math.min(4, Math.trunc(v)));
+    const ny = take(wheel.y), nx = take(wheel.x);
+    wheel.y -= Math.trunc(wheel.y) === ny ? ny : Math.trunc(wheel.y);
+    wheel.x -= Math.trunc(wheel.x) === nx ? nx : Math.trunc(wheel.x);
+    for (let i = 0; i < Math.abs(ny); i++) send(s, { t: "w", v: ny > 0 ? -120 : 120 });
+    for (let i = 0; i < Math.abs(nx); i++) send(s, { t: "w", v: nx > 0 ? 120 : -120, h: true });
   }, { passive: false });
 
   // Keys go out in order through one promise chain, so Ctrl+V can wait for
@@ -577,16 +592,32 @@ async function updateStats(s) {
     fps = Math.round(Math.max(0, frames - lastStats.frames) / secs);
   }
   lastStats = { pc: s.pc, bytes, frames, t: now };
-  $("stats").textContent =
-    `rtt ${rtt === null ? "–" : Math.round(rtt * 1000) + "ms"} · ` +
-    `buf ${jitterMs === null ? "–" : Math.round(jitterMs) + "ms"} · ` +
-    `${fps} fps · ${Math.max(0, Math.round(kbps))} kbps`;
+  const rttText = rtt === null ? "–" : Math.round(rtt * 1000) + "ms";
+  // Collapsed bar: just the essentials.
+  $("stats").textContent = $("hud").classList.contains("collapsed")
+    ? `${fps} fps · ${rttText}`
+    : `rtt ${rttText} · ` +
+      `buf ${jitterMs === null ? "–" : Math.round(jitterMs) + "ms"} · ` +
+      `${fps} fps · ${Math.max(0, Math.round(kbps))} kbps`;
 }
 
 // ---------- session bar: always shown, drag by the grip ----------
 
 (() => {
-  const hud = $("hud"), grip = $("hud-grip");
+  const hud = $("hud"), grip = $("hud-grip"), toggle = $("hud-toggle");
+  // Small by default; the ☰ button shows the controls (remembered).
+  const setOpen = (open) => {
+    hud.classList.toggle("collapsed", !open);
+    toggle.textContent = open ? "✕" : "☰";
+    toggle.title = open ? "Hide controls" : "Show controls";
+  };
+  try { setOpen(localStorage.getItem("hud-open") === "1"); } catch { setOpen(false); }
+  toggle.addEventListener("click", () => {
+    const open = hud.classList.contains("collapsed");
+    setOpen(open);
+    try { localStorage.setItem("hud-open", open ? "1" : "0"); } catch {}
+    $("screen").focus();
+  });
   const load = () => {
     try { return JSON.parse(localStorage.getItem("hud-pos")); } catch { return null; }
   };

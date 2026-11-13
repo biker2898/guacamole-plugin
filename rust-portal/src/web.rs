@@ -136,6 +136,9 @@ async fn admin_js() -> impl IntoResponse {
 }
 
 /// nginx sets X-Real-IP; we only listen on localhost, so it can be trusted.
+/// Account name shown in authenticator apps.
+const TOTP_ISSUER: &str = "2FA SW";
+
 fn client_ip(headers: &HeaderMap, peer: SocketAddr) -> IpAddr {
     headers
         .get("x-real-ip")
@@ -215,8 +218,8 @@ async fn login(
             }
         };
         let setup = || {
-            let issuer = headers.get(header::HOST).and_then(|v| v.to_str().ok()).unwrap_or("Rust Portal");
-            let (uri, qr) = auth::totp_enrollment(issuer, &user.username, &pending);
+            // Authenticator apps show this name with the username, not the site's domain.
+            let (uri, qr) = auth::totp_enrollment(TOTP_ISSUER, &user.username, &pending);
             json!({ "secret": pending, "uri": uri, "qr": qr })
         };
         if req.otp.trim().is_empty() {
