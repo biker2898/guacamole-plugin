@@ -4,8 +4,10 @@
  *
  *  - A ping meter: round-trip time between this browser and the Guacamole
  *    server, measured from the "ping" messages the Guacamole WebSocket tunnel
- *    already sends and the server echoes back. It does not include the hop
- *    from the Guacamole server to the remote desktop.
+ *    already sends and the server echoes back. With the HTTP tunnel, which
+ *    sends no pings, it times a small request to the server every 2 seconds
+ *    instead. It does not include the hop from the Guacamole server to the
+ *    remote desktop.
  *
  *  - A fullscreen toggle (hidden where the Fullscreen API is missing, such as
  *    Safari on iPhone).
@@ -141,6 +143,66 @@
         });
         window.WebSocket = WrappedWebSocket;
     }
+
+    // The HTTP tunnel (Guacamole's fallback when the WebSocket tunnel is
+    // refused, as on a site served over HTTP/3) sends no pings. Notice it
+    // from its requests and time a small request of our own instead, over
+    // the same connection type the tunnel uses.
+    var HTTP_PING_MS = 2000;
+    var HTTP_PING_TIMEOUT_MS = 10000;
+    var HTTP_TUNNEL = /(?:^|\/)tunnel\?(connect|read:)/;
+    var httpTunnel = false;
+    var httpPingBusy = false;
+
+    var nativeOpen = window.XMLHttpRequest && XMLHttpRequest.prototype.open;
+    if (nativeOpen) {
+        XMLHttpRequest.prototype.open = function (method, url) {
+            var match = typeof url === 'string' && HTTP_TUNNEL.exec(url);
+            if (match) {
+                if (match[1] === 'connect') {
+                    activeSocket = null;
+                    resetSamples();
+                }
+                httpTunnel = true;
+            }
+            return nativeOpen.apply(this, arguments);
+        };
+    }
+
+    function httpPing() {
+
+        if (!httpTunnel || httpPingBusy || activeSocket || !window.fetch
+                || !/^#\/client\//.test(window.location.hash))
+            return;
+
+        httpPingBusy = true;
+        var controller = window.AbortController ? new AbortController() : null;
+        var timer = controller && window.setTimeout(function () { controller.abort(); }, HTTP_PING_TIMEOUT_MS);
+        var start = window.performance ? performance.now() : Date.now();
+
+        window.fetch(new URL('api/languages', doc.baseURI).href, {
+            cache: 'no-store',
+            credentials: 'same-origin',
+            signal: controller ? controller.signal : undefined
+        }).then(function (response) {
+            return response.arrayBuffer().then(function () {
+                if (!response.ok)
+                    return;
+                var rtt = Math.round((window.performance ? performance.now() : Date.now()) - start);
+                samples.push(rtt);
+                if (samples.length > SAMPLE_COUNT)
+                    samples.shift();
+                lastEcho = Date.now();
+            });
+        }).catch(function () {
+            // A failed ping leaves lastEcho alone, so the meter turns "lost"
+        }).then(function () {
+            if (timer)
+                window.clearTimeout(timer);
+            httpPingBusy = false;
+        });
+    }
+    window.setInterval(httpPing, HTTP_PING_MS);
 
     function updatePing(meter, label) {
 
