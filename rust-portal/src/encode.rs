@@ -43,6 +43,10 @@ const IDLE_HEARTBEAT: Duration = Duration::from_secs(1);
 /// estimate alone stalled the picture for seconds when a full-screen change
 /// (Excel scrolling) met a low estimate; str0m's pacer smooths the rest.
 const MAX_FRAME_BUDGET: Duration = Duration::from_millis(250);
+/// At most this much sent video may still be draining (at the estimate)
+/// when the next frame goes out. Bounds the queue when large frames come
+/// faster than MAX_FRAME_BUDGET alone would allow for.
+const MAX_BACKLOG: Duration = Duration::from_secs(1);
 
 const TIERS: [u32; 9] = [
     150_000, 300_000, 500_000, 800_000, 1_200_000, 2_000_000, 3_000_000, 4_500_000, 6_000_000,
@@ -90,7 +94,13 @@ fn make_encoder(bitrate: u32) -> anyhow::Result<Encoder> {
         .max_frame_rate(FrameRate::from_hz(30.0))
         .usage_type(UsageType::ScreenContentRealTime)
         .rate_control_mode(RateControlMode::Bitrate)
-        .skip_frames(true)
+        // No skipping inside openh264: its skip buffer drains per encode call
+        // (bitrate / 30 fps each), not per second, and we call it only when
+        // the screen changes or once a second when idle. After one large
+        // frame on a slow link it skipped every frame for 10 s or more, and
+        // the picture came back only once typing made enough calls. The
+        // pacing in `run` keeps the bitrate instead, by the clock.
+        .skip_frames(false)
         .complexity(Complexity::Low)
         .qp(QpRange::new(12, 42))
         .intra_frame_period(IntraFramePeriod::from_num_frames(0))
@@ -116,6 +126,8 @@ fn run(shared: &Shared, max_bitrate: u32, tx: &mpsc::Sender<Frame>) -> anyhow::R
     let mut pending_tier: Option<(u32, Instant)> = None;
     let mut last_frame = Instant::now() - Duration::from_secs(1);
     let mut budget_until = Instant::now();
+    // When all video sent so far will have drained at the estimate.
+    let mut backlog_until = Instant::now();
     let mut settle = 0u32;
     // When a frame last actually went out (rate control may skip some).
     let mut last_sent = Instant::now();
@@ -133,7 +145,8 @@ fn run(shared: &Shared, max_bitrate: u32, tx: &mpsc::Sender<Frame>) -> anyhow::R
         }
 
         // Pace: at most 30 fps, and no faster than the bitrate estimate drains.
-        let earliest = (last_frame + MIN_FRAME_INTERVAL).max(budget_until);
+        let backlog_ok = backlog_until.checked_sub(MAX_BACKLOG).unwrap_or(last_frame);
+        let earliest = (last_frame + MIN_FRAME_INTERVAL).max(budget_until).max(backlog_ok);
         let now = Instant::now();
         if now < earliest {
             std::thread::sleep(earliest - now);
@@ -203,6 +216,7 @@ fn run(shared: &Shared, max_bitrate: u32, tx: &mpsc::Sender<Frame>) -> anyhow::R
         let bits = u64::try_from(data.len()).unwrap_or(u64::MAX).saturating_mul(8);
         let transfer = Duration::from_micros(bits.saturating_mul(1_000_000) / u64::from(target));
         budget_until = last_frame + transfer.min(MAX_FRAME_BUDGET);
+        backlog_until = backlog_until.max(last_frame) + transfer;
         if keyframe {
             shared.keyframe_sent(transfer);
         }
@@ -231,6 +245,34 @@ fn run(shared: &Shared, max_bitrate: u32, tx: &mpsc::Sender<Frame>) -> anyhow::R
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn no_frames_skipped_after_large_frame() {
+        // A busy 1366x768 screen at the lowest tier: the first frame is far
+        // larger than a second's worth of bits.
+        let mut encoder = make_encoder(TIERS[0]).unwrap();
+        let (w, h) = (1366, 768);
+        let mut seed = 1u32;
+        let mut rgba: Vec<u8> = (0..w * h * 4)
+            .map(|_| {
+                seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+                (seed >> 16) as u8
+            })
+            .collect();
+        let first = encoder.encode(&YUVBuffer::from_rgba8_source(RgbaSliceU8::new(&rgba, (w, h)))).unwrap().to_vec();
+        assert!(first.len() * 8 > TIERS[0] as usize, "first frame only {} bytes", first.len());
+        // Then typing: one small change per call, as few calls as on a quiet
+        // screen. With openh264's own skipping, these came out empty.
+        for i in 0..20u8 {
+            for y in 300..316 {
+                for x in 400..410 {
+                    rgba[(y * w + x) * 4] = i.wrapping_mul(40);
+                }
+            }
+            let out = encoder.encode(&YUVBuffer::from_rgba8_source(RgbaSliceU8::new(&rgba, (w, h)))).unwrap().to_vec();
+            assert!(!out.is_empty(), "frame {i} skipped");
+        }
+    }
 
     #[test]
     fn bitrate_changes_without_keyframe() {
