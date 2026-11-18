@@ -201,8 +201,11 @@ fn run(shared: &Shared, max_bitrate: u32, tx: &mpsc::Sender<Frame>) -> anyhow::R
         last_sent = last_frame;
 
         let bits = u64::try_from(data.len()).unwrap_or(u64::MAX).saturating_mul(8);
-        budget_until = last_frame
-            + Duration::from_micros(bits.saturating_mul(1_000_000) / u64::from(target)).min(MAX_FRAME_BUDGET);
+        let transfer = Duration::from_micros(bits.saturating_mul(1_000_000) / u64::from(target));
+        budget_until = last_frame + transfer.min(MAX_FRAME_BUDGET);
+        if keyframe {
+            shared.keyframe_sent(transfer);
+        }
 
         stats.1 += 1;
         stats.2 += data.len();

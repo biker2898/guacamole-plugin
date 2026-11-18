@@ -43,7 +43,16 @@ pub struct Shared {
     pub target_bps: AtomicU32,
     /// Bitrate the encoder currently aims for (for the stats log).
     pub tier_bps: AtomicU32,
+    /// Until when the browser's keyframe requests are answered by the
+    /// keyframe already on its way (see `browser_keyframe_request`).
+    keyframe_quiet_until: Mutex<Instant>,
 }
+
+/// Added to a keyframe's transfer time before the browser's keyframe
+/// requests count again: round trip plus pacing slack.
+const KEYFRAME_SLACK: Duration = Duration::from_millis(500);
+/// Longest time keyframe requests are ignored after one keyframe.
+const MAX_KEYFRAME_QUIET: Duration = Duration::from_secs(8);
 
 impl Shared {
     pub fn new(initial_bps: u32) -> Arc<Self> {
@@ -53,6 +62,7 @@ impl Shared {
             wake: Condvar::new(),
             target_bps: AtomicU32::new(initial_bps),
             tier_bps: AtomicU32::new(0),
+            keyframe_quiet_until: Mutex::new(Instant::now()),
         })
     }
 
@@ -81,6 +91,26 @@ impl Shared {
 
     pub fn request_keyframe(&self) {
         self.update(|f| f.keyframe = true);
+    }
+
+    /// The encoder sent a keyframe that takes about `transfer` to reach the
+    /// browser at the current bandwidth estimate.
+    pub fn keyframe_sent(&self, transfer: Duration) {
+        *self.keyframe_quiet_until.lock().unwrap() = Instant::now() + (transfer + KEYFRAME_SLACK).min(MAX_KEYFRAME_QUIET);
+    }
+
+    /// A keyframe request (PLI/FIR) from the browser. Returns false when it
+    /// is ignored because a keyframe is still on its way: on a slow link a
+    /// large keyframe takes seconds to arrive, the browser asks again in the
+    /// meantime, and answering each request with another keyframe kept every
+    /// frame a keyframe (about one frame per 5 s) for hours. The browser
+    /// repeats its request if the keyframe on its way does not help.
+    pub fn browser_keyframe_request(&self) -> bool {
+        if Instant::now() < *self.keyframe_quiet_until.lock().unwrap() {
+            return false;
+        }
+        self.request_keyframe();
+        true
     }
 
     pub fn stop(&self) {
@@ -540,7 +570,11 @@ async fn run_inner(
                         dc.chan = Some(id);
                         dc.flush(&mut rtc);
                     }
-                    Event::KeyframeRequest(_) => shared.request_keyframe(),
+                    Event::KeyframeRequest(_) => {
+                        if !shared.browser_keyframe_request() {
+                            link.keyframe_requests_ignored += 1;
+                        }
+                    }
                     Event::EgressBitrateEstimate(BweKind::Twcc { estimate, .. }) => {
                         let bps = u32::try_from(estimate.as_u64()).unwrap_or(u32::MAX);
                         shared.target_bps.store(bps.min(config.max_bitrate), Ordering::Relaxed);
@@ -687,6 +721,8 @@ struct LinkStats {
     keyframes: u32,
     max_frame: usize,
     max_encode_ms: u32,
+    /// Browser keyframe requests ignored because a keyframe was on its way.
+    keyframe_requests_ignored: u32,
     /// Cumulative counters from the browser's RTCP, and their last logged values.
     nacks: u64,
     plis: u64,
@@ -707,6 +743,7 @@ impl LinkStats {
             keyframes: 0,
             max_frame: 0,
             max_encode_ms: 0,
+            keyframe_requests_ignored: 0,
             nacks: 0,
             plis: 0,
             logged_nacks: 0,
@@ -752,6 +789,7 @@ impl LinkStats {
             max_encode_ms = self.max_encode_ms,
             nacks = self.nacks - self.logged_nacks.min(self.nacks),
             plis = self.plis - self.logged_plis.min(self.plis),
+            plis_ignored = self.keyframe_requests_ignored,
             "link"
         );
         let (nacks, plis) = (self.nacks, self.plis);
@@ -791,5 +829,33 @@ mod dc_tests {
         sent.insert(id.expect("first use carries the image"));
         let (again, id) = cursor_message(&CursorState::Shape(p), &sent);
         assert!(!again.contains("rgba") && again.contains("\"id\"") && id.is_none());
+    }
+}
+
+#[cfg(test)]
+mod keyframe_tests {
+    use super::*;
+
+    #[test]
+    fn requests_ignored_while_keyframe_on_its_way() {
+        let shared = Shared::new(150_000);
+        assert!(shared.browser_keyframe_request(), "no keyframe sent yet");
+        assert!(shared.take_flags().keyframe);
+
+        // A 74 KB keyframe at 150 kbps takes about 4 s.
+        shared.keyframe_sent(Duration::from_secs(4));
+        assert!(!shared.browser_keyframe_request());
+        assert!(!shared.take_flags().keyframe);
+
+        // Once it could have arrived, requests count again.
+        shared.keyframe_sent(Duration::ZERO);
+        *shared.keyframe_quiet_until.lock().unwrap() = Instant::now();
+        assert!(shared.browser_keyframe_request());
+        assert!(shared.take_flags().keyframe);
+
+        // Internal requests (connect, recovery) are never throttled.
+        shared.keyframe_sent(Duration::from_secs(4));
+        shared.request_keyframe();
+        assert!(shared.take_flags().keyframe);
     }
 }
