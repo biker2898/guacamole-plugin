@@ -48,9 +48,123 @@ const MAX_FRAME_BUDGET: Duration = Duration::from_millis(250);
 /// faster than MAX_FRAME_BUDGET alone would allow for.
 const MAX_BACKLOG: Duration = Duration::from_secs(1);
 
+/// Estimates below this count as this, so pacing waits stay finite.
+const MIN_ESTIMATE: u32 = 20_000;
+/// While a frame waits for the backlog to drain, how often the wait is
+/// worked out again from the latest estimate.
+const PACE_RECHECK: Duration = Duration::from_millis(50);
+
 const TIERS: [u32; 9] = [
     150_000, 300_000, 500_000, 800_000, 1_200_000, 2_000_000, 3_000_000, 4_500_000, 6_000_000,
 ];
+
+/// A lower estimate must last this long before the encoder drops a tier.
+const TIER_DOWN_HOLD: Duration = Duration::from_secs(1);
+/// A higher estimate must last this long before the encoder climbs.
+const TIER_UP_HOLD: Duration = Duration::from_secs(3);
+/// Climbing back to a tier left less than TIER_RETURN_WINDOW ago waits only
+/// TIER_RETURN_HOLD. A burst (a keyframe, a full-screen change) makes str0m
+/// cut its estimate to 0.85 x the acknowledged bitrate, which on a quiet
+/// desktop is about the 150 kbps padding floor, and its probes find the real
+/// figure again within seconds. The slow climb then kept the picture at the
+/// lowest tier, blurred, for seconds after every such dip.
+const TIER_RETURN_WINDOW: Duration = Duration::from_secs(20);
+const TIER_RETURN_HOLD: Duration = Duration::from_millis(500);
+
+/// Picks the encoder's bitrate tier from the estimate: drops after a short
+/// hold, climbs after a longer one, and goes back quickly to a tier it has
+/// just left.
+struct TierControl {
+    tier: u32,
+    /// Direction (true = down), the tier to move to and since when. Down:
+    /// the highest tier wanted during the hold; up: the lowest. So a
+    /// wobbling estimate still moves the tier, by the smallest step that
+    /// held all along.
+    pending: Option<(bool, u32, Instant)>,
+    /// The highest tier recent drops left, and when the last drop was.
+    dropped_from: Option<(u32, Instant)>,
+}
+
+impl TierControl {
+    fn new(tier: u32) -> Self {
+        Self { tier, pending: None, dropped_from: None }
+    }
+
+    /// Feeds the tier the estimate allows now; returns the new tier when it changes.
+    fn update(&mut self, wanted: u32, now: Instant) -> Option<u32> {
+        if wanted == self.tier {
+            self.pending = None;
+            return None;
+        }
+        let down = wanted < self.tier;
+        let (to, since) = match self.pending {
+            Some((d, t, since)) if d == down => (if down { t.max(wanted) } else { t.min(wanted) }, since),
+            _ => (wanted, now),
+        };
+        self.pending = Some((down, to, since));
+        let recent = self.dropped_from.filter(|(_, at)| now.duration_since(*at) < TIER_RETURN_WINDOW);
+        let hold = if down {
+            TIER_DOWN_HOLD
+        } else if recent.is_some_and(|(from, _)| to <= from) {
+            TIER_RETURN_HOLD
+        } else {
+            TIER_UP_HOLD
+        };
+        if now.duration_since(since) < hold {
+            return None;
+        }
+        if down {
+            let from = recent.map_or(self.tier, |(from, _)| from.max(self.tier));
+            self.dropped_from = Some((from, now));
+        } else if recent.is_some_and(|(from, _)| to >= from) {
+            self.dropped_from = None;
+        }
+        self.tier = to;
+        self.pending = None;
+        Some(to)
+    }
+}
+
+/// Video sent but not yet drained at the estimate, in bits. It mirrors
+/// str0m's pacer, which sends at the current estimate (x 1.1). Kept in bits
+/// rather than as a finishing time, so a recovered estimate shortens the wait
+/// at once: a keyframe sent during a brief dip to 100 kbps had held back the
+/// next frame for seconds after the estimate was back at megabits.
+struct Backlog {
+    bits: f64,
+    at: Instant,
+}
+
+impl Backlog {
+    fn new(now: Instant) -> Self {
+        Self { bits: 0.0, at: now }
+    }
+
+    fn drain(&mut self, bps: u32, now: Instant) {
+        let secs = now.saturating_duration_since(self.at).as_secs_f64();
+        self.bits = (self.bits - secs * f64::from(bps)).max(0.0);
+        self.at = self.at.max(now);
+    }
+
+    fn add(&mut self, bits: u64) {
+        self.bits += bits as f64;
+    }
+
+    /// How long everything queued takes to go out at `bps`.
+    fn time(&self, bps: u32) -> Duration {
+        Duration::from_secs_f64(self.bits / f64::from(bps.max(1)))
+    }
+
+    /// How long until at most `max` of sending remains queued at `bps`.
+    fn wait(&self, bps: u32, max: Duration) -> Duration {
+        self.time(bps).saturating_sub(max)
+    }
+}
+
+/// The current bandwidth estimate as the encoder uses it for pacing.
+fn estimate(shared: &Shared) -> u32 {
+    shared.target_bps.load(Ordering::Relaxed).max(MIN_ESTIMATE)
+}
 
 fn tier_for(estimate: u32, max: u32) -> u32 {
     // Leave headroom for retransmissions and RTCP.
@@ -69,9 +183,13 @@ fn tier_for(estimate: u32, max: u32) -> u32 {
 /// fluctuating estimate those big frames came several times a second.
 ///
 /// The openh264 crate sets the layer's maximum equal to the target, and
-/// openh264 refuses a target above the maximum, so the maximum moves first
-/// when going up and last when going down.
-fn set_bitrate(encoder: &mut Encoder, from: u32, to: u32) -> anyhow::Result<()> {
+/// openh264 refuses a target above the maximum (or a maximum below the
+/// target). The maximum is first raised to `ceiling`, so the change works
+/// whatever the encoder holds now, then lowered to the new target. Ordering
+/// the two by the old tier failed whenever the encoder's own values were not
+/// that tier (`SetOption(5, 2000000) failed: 1`), and the fallback then cost
+/// a keyframe.
+fn set_bitrate(encoder: &mut Encoder, to: u32, ceiling: u32) -> anyhow::Result<()> {
     let mut set = |option, layer, bitrate: u32| -> anyhow::Result<()> {
         let mut info = SBitrateInfo { iLayer: layer, iBitrate: i32::try_from(bitrate).unwrap_or(i32::MAX) };
         // SAFETY: both options take a pointer to SBitrateInfo, valid for the call.
@@ -79,13 +197,9 @@ fn set_bitrate(encoder: &mut Encoder, from: u32, to: u32) -> anyhow::Result<()> 
         anyhow::ensure!(rc == 0, "openh264 SetOption({option}, {bitrate}) failed: {rc}");
         Ok(())
     };
-    if to > from {
-        set(ENCODER_OPTION_MAX_BITRATE, SPATIAL_LAYER_0, to)?;
-        set(ENCODER_OPTION_BITRATE, SPATIAL_LAYER_ALL, to)
-    } else {
-        set(ENCODER_OPTION_BITRATE, SPATIAL_LAYER_ALL, to)?;
-        set(ENCODER_OPTION_MAX_BITRATE, SPATIAL_LAYER_0, to)
-    }
+    set(ENCODER_OPTION_MAX_BITRATE, SPATIAL_LAYER_0, ceiling.max(to))?;
+    set(ENCODER_OPTION_BITRATE, SPATIAL_LAYER_ALL, to)?;
+    set(ENCODER_OPTION_MAX_BITRATE, SPATIAL_LAYER_0, to)
 }
 
 fn make_encoder(bitrate: u32) -> anyhow::Result<Encoder> {
@@ -120,14 +234,14 @@ pub fn spawn(shared: Arc<Shared>, max_bitrate: u32, tx: mpsc::Sender<Frame>) -> 
 }
 
 fn run(shared: &Shared, max_bitrate: u32, tx: &mpsc::Sender<Frame>) -> anyhow::Result<()> {
-    let mut tier = tier_for(shared.target_bps.load(Ordering::Relaxed), max_bitrate);
-    let mut encoder = make_encoder(tier)?;
-    shared.tier_bps.store(tier, Ordering::Relaxed);
-    let mut pending_tier: Option<(u32, Instant)> = None;
+    let mut tiers = TierControl::new(tier_for(estimate(shared), max_bitrate));
+    let mut encoder = make_encoder(tiers.tier)?;
+    shared.tier_bps.store(tiers.tier, Ordering::Relaxed);
+    // Size of the frames the encoder was last given.
+    let mut size: Option<(u16, u16)> = None;
     let mut last_frame = Instant::now() - Duration::from_secs(1);
     let mut budget_until = Instant::now();
-    // When all video sent so far will have drained at the estimate.
-    let mut backlog_until = Instant::now();
+    let mut backlog = Backlog::new(Instant::now());
     let mut settle = 0u32;
     // When a frame last actually went out (rate control may skip some).
     let mut last_sent = Instant::now();
@@ -144,12 +258,19 @@ fn run(shared: &Shared, max_bitrate: u32, tx: &mpsc::Sender<Frame>) -> anyhow::R
             continue;
         }
 
-        // Pace: at most 30 fps, and no faster than the bitrate estimate drains.
-        let backlog_ok = backlog_until.checked_sub(MAX_BACKLOG).unwrap_or(last_frame);
-        let earliest = (last_frame + MIN_FRAME_INTERVAL).max(budget_until).max(backlog_ok);
-        let now = Instant::now();
-        if now < earliest {
-            std::thread::sleep(earliest - now);
+        // Pace: at most 30 fps, and no faster than the estimate drains what
+        // was sent. The estimate can change while waiting, so look again.
+        loop {
+            let now = Instant::now();
+            let bps = estimate(shared);
+            backlog.drain(bps, now);
+            let earliest = (last_frame + MIN_FRAME_INTERVAL)
+                .max(budget_until)
+                .max(now + backlog.wait(bps, MAX_BACKLOG));
+            if now >= earliest {
+                break;
+            }
+            std::thread::sleep((earliest - now).min(PACE_RECHECK));
             let more = shared.take_flags();
             flags.dirty |= more.dirty;
             flags.keyframe |= more.keyframe;
@@ -158,39 +279,37 @@ fn run(shared: &Shared, max_bitrate: u32, tx: &mpsc::Sender<Frame>) -> anyhow::R
             }
         }
 
-        // Follow the bandwidth estimate: drop quickly, climb slowly.
-        let target = shared.target_bps.load(Ordering::Relaxed).max(TIERS[0]);
-        let wanted = tier_for(target, max_bitrate);
-        if wanted != tier {
-            let hold = if wanted < tier { Duration::from_millis(500) } else { Duration::from_secs(3) };
-            match pending_tier {
-                Some((t, since)) if t == wanted && since.elapsed() >= hold => {
-                    debug!(from = tier, to = wanted, estimate = target, "encoder bitrate change");
-                    let from = tier;
-                    tier = wanted;
-                    shared.tier_bps.store(tier, Ordering::Relaxed);
-                    if let Err(e) = set_bitrate(&mut encoder, from, tier) {
-                        // Fall back to a new encoder (costs a keyframe).
-                        warn!("{e:#}");
-                        encoder = make_encoder(tier)?;
-                    }
-                    pending_tier = None;
-                }
-                Some((t, _)) if t == wanted => {}
-                _ => pending_tier = Some((wanted, Instant::now())),
+        // Follow the bandwidth estimate (see TierControl).
+        let target = estimate(shared);
+        let from = tiers.tier;
+        if let Some(tier) = tiers.update(tier_for(target, max_bitrate), Instant::now()) {
+            debug!(from, to = tier, estimate = target, "encoder bitrate change");
+            shared.tier_bps.store(tier, Ordering::Relaxed);
+            if let Err(e) = set_bitrate(&mut encoder, tier, max_bitrate) {
+                // Fall back to a new encoder (costs a keyframe).
+                warn!("{e:#}");
+                encoder = make_encoder(tier)?;
             }
-        } else {
-            pending_tier = None;
         }
 
-        let Some(yuv) = shared.with_image_opt(|image| {
-            YUVBuffer::from_rgba8_source(RgbaSliceU8::new(
+        let Some((yuv, frame_size)) = shared.with_image_opt(|image| {
+            let yuv = YUVBuffer::from_rgba8_source(RgbaSliceU8::new(
                 image.data(),
                 (usize::from(image.width()), usize::from(image.height())),
-            ))
+            ));
+            (yuv, (image.width(), image.height()))
         }) else {
             continue;
         };
+        // On a new size the openh264 crate re-initializes the encoder with the
+        // bitrate it was created with, not the current tier, so the encoder
+        // ran at the wrong bitrate after every resize and the next change
+        // failed. A new encoder at the current tier instead (the new size
+        // starts with a keyframe either way).
+        if size.is_some_and(|s| s != frame_size) {
+            encoder = make_encoder(tiers.tier)?;
+        }
+        size = Some(frame_size);
 
         if flags.keyframe {
             encoder.force_intra_frame();
@@ -213,12 +332,20 @@ fn run(shared: &Shared, max_bitrate: u32, tx: &mpsc::Sender<Frame>) -> anyhow::R
         }
         last_sent = last_frame;
 
+        // Timed by the real estimate, also below the lowest tier: rounded up
+        // to 150 kbps, a link estimated at 50 kbps was sent three times what
+        // it carried (RTT grew to 35 s), and the keyframe quiet time ended
+        // long before the keyframe could arrive, so each keyframe request
+        // was answered with another keyframe.
+        let bps = estimate(shared);
         let bits = u64::try_from(data.len()).unwrap_or(u64::MAX).saturating_mul(8);
-        let transfer = Duration::from_micros(bits.saturating_mul(1_000_000) / u64::from(target));
+        let transfer = Duration::from_micros(bits.saturating_mul(1_000_000) / u64::from(bps));
         budget_until = last_frame + transfer.min(MAX_FRAME_BUDGET);
-        backlog_until = backlog_until.max(last_frame) + transfer;
+        backlog.drain(bps, last_frame);
+        backlog.add(bits);
         if keyframe {
-            shared.keyframe_sent(transfer);
+            // It arrives after everything still queued ahead of it.
+            shared.keyframe_sent(backlog.time(bps));
         }
 
         stats.1 += 1;
@@ -227,8 +354,8 @@ fn run(shared: &Shared, max_bitrate: u32, tx: &mpsc::Sender<Frame>) -> anyhow::R
             debug!(
                 fps = stats.1 / 10,
                 kbps = stats.2 * 8 / 10 / 1000,
-                tier,
-                target,
+                tier = tiers.tier,
+                estimate = bps,
                 encode_ms,
                 "encoder stats"
             );
@@ -291,13 +418,69 @@ mod tests {
         };
         assert!(matches!(encode(&mut encoder, 0), FrameType::IDR | FrameType::I));
         assert!(!matches!(encode(&mut encoder, 1), FrameType::IDR | FrameType::I), "keyframe with no change");
-        let mut from = 300_000;
         for to in [6_000_000, 150_000, 2_000_000, 300_000] {
-            set_bitrate(&mut encoder, from, to).unwrap();
-            from = to;
+            set_bitrate(&mut encoder, to, 6_000_000).unwrap();
             let kind = encode(&mut encoder, (to / 1000) as u8);
             assert!(!matches!(kind, FrameType::IDR | FrameType::I), "keyframe after change to {to}");
         }
+    }
+
+    #[test]
+    fn bitrate_change_after_resize() {
+        // The crate re-initializes at its creation bitrate (800 kbps) on a new
+        // size, while the session believes 3 Mbps: both directions must work.
+        let mut encoder = make_encoder(800_000).unwrap();
+        let frame = |w: usize, h: usize| YUVBuffer::from_rgba8_source(RgbaSliceU8::new(&vec![90u8; w * h * 4], (w, h)));
+        encoder.encode(&frame(640, 480)).unwrap();
+        set_bitrate(&mut encoder, 3_000_000, 6_000_000).unwrap();
+        encoder.encode(&frame(800, 600)).unwrap();
+        set_bitrate(&mut encoder, 2_000_000, 6_000_000).unwrap();
+        encoder.encode(&frame(640, 480)).unwrap();
+        set_bitrate(&mut encoder, 300_000, 6_000_000).unwrap();
+        set_bitrate(&mut encoder, 150_000, 6_000_000).unwrap();
+    }
+
+    #[test]
+    fn tier_returns_quickly_after_brief_dip() {
+        let t0 = Instant::now();
+        let at = |ms: u64| t0 + Duration::from_millis(ms);
+        let mut c = TierControl::new(3_000_000);
+        // A dip shorter than the down hold changes nothing.
+        assert_eq!(c.update(150_000, at(0)), None);
+        assert_eq!(c.update(150_000, at(900)), None);
+        assert_eq!(c.update(3_000_000, at(950)), None);
+        // A longer one drops, by the smallest step that held all along.
+        assert_eq!(c.update(150_000, at(1_000)), None);
+        assert_eq!(c.update(500_000, at(1_500)), None);
+        assert_eq!(c.update(150_000, at(2_000)), Some(500_000));
+        // Back up: to the tier just left after the short hold, not 3 s.
+        assert_eq!(c.update(3_000_000, at(2_100)), None);
+        assert_eq!(c.update(3_000_000, at(2_600)), Some(3_000_000));
+        // Above that tier the normal hold applies.
+        assert_eq!(c.update(6_000_000, at(3_000)), None);
+        assert_eq!(c.update(6_000_000, at(5_000)), None);
+        assert_eq!(c.update(6_000_000, at(6_000)), Some(6_000_000));
+        // Long after a drop, climbing back is slow again.
+        let mut c = TierControl::new(3_000_000);
+        c.update(150_000, at(0));
+        assert_eq!(c.update(150_000, at(1_000)), Some(150_000));
+        assert_eq!(c.update(3_000_000, at(30_000)), None);
+        assert_eq!(c.update(3_000_000, at(30_500)), None);
+        assert_eq!(c.update(3_000_000, at(33_000)), Some(3_000_000));
+    }
+
+    #[test]
+    fn backlog_follows_the_current_estimate() {
+        let t0 = Instant::now();
+        let mut b = Backlog::new(t0);
+        // A 42 KB keyframe during a dip to 100 kbps: about 3.4 s queued.
+        b.add(42 * 1024 * 8);
+        assert!(b.wait(100_000, MAX_BACKLOG) > Duration::from_secs(2));
+        // 200 ms later the estimate is back at 5 Mbps: no wait left.
+        b.drain(100_000, t0 + Duration::from_millis(200));
+        assert_eq!(b.wait(5_000_000, MAX_BACKLOG), Duration::ZERO);
+        b.drain(5_000_000, t0 + Duration::from_millis(300));
+        assert_eq!(b.time(5_000_000), Duration::ZERO);
     }
 }
 
